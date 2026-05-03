@@ -71,7 +71,8 @@ QG --> REL
 - `run-unit-all.sh`：串行运行 Go 单元测试和 Node 测试。
 - `npm run build --prefix webui`：验证管理台可生产构建。
 - `quality-gates.yml`：在 push/PR 上运行 lint、单测、WebUI build 和跨平台构建。
-- `release-artifacts.yml`：发布时构建压缩包、Docker 镜像和 checksum。
+- `release-artifacts.yml`：推送版本 tag、发布 GitHub Release 或手动触发时，构建压缩包、Docker 镜像和 checksum。
+- CI 内的多平台 Go 构建默认串行执行，避免 `modernc.org/sqlite` 等较重依赖在 GitHub hosted runner 上并发编译导致内存压力和 `xargs` 123 汇总失败。
 
 **章节来源**
 - [scripts/lint.sh](file://scripts/lint.sh)
@@ -123,6 +124,20 @@ rg -n -i "<旧项目关键词>|<旧仓库地址>|<旧维护者标识>" README.MD
 ### 发布产物
 
 Release 构建会生成 Linux、macOS、Windows 多架构压缩包，构建 GHCR 镜像，并生成 `sha256sums.txt`。
+
+触发方式：
+
+```bash
+git tag v1.0.1
+git push meow v1.0.1
+```
+
+也可以在 GitHub Actions 页面手动运行 `Release Artifacts`。手动运行时填写 `release_tag` 会使用指定 tag；不填写则读取仓库根目录 `VERSION`。
+
+产物位置：
+
+- GitHub Releases：多平台 `.tar.gz` / `.zip`、Docker image tar.gz、`sha256sums.txt`。
+- GitHub Packages：`ghcr.io/meow-calculations/deepseek-web-to-api`。
 
 **章节来源**
 - [tests/scripts/check-refactor-line-gate.sh](file://tests/scripts/check-refactor-line-gate.sh)

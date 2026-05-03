@@ -18,6 +18,7 @@ env:
   GO_VERSION: "1.26.x"
   NODE_VERSION: "24"
   GOLANGCI_LINT_VERSION: "v2.11.4"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   lint-and-refactor:
@@ -129,5 +130,5 @@ jobs:
 
       - name: Cross-Build Release Targets
         env:
-          CROSS_BUILD_JOBS: "3"
+          CROSS_BUILD_JOBS: "1"
         run: ./tests/scripts/check-cross-build.sh
