@@ -1,213 +1,141 @@
-# Runtime Operations
+# 运行运维
 
 <cite>
 **本文档引用的文件**
-- [internal/config/config.go](file://internal/config/config.go)
-- [internal/config/store.go](file://internal/config/store.go)
-- [internal/config/store_load.go](file://internal/config/store_load.go)
-- [internal/config/store_accessors.go](file://internal/config/store_accessors.go)
-- [internal/config/validation.go](file://internal/config/validation.go)
-- [internal/auth/request.go](file://internal/auth/request.go)
-- [internal/auth/admin.go](file://internal/auth/admin.go)
+- [cmd/DeepSeek_Web_To_API/main.go](file://cmd/DeepSeek_Web_To_API/main.go)
+- [internal/server/router.go](file://internal/server/router.go)
 - [internal/account/pool_core.go](file://internal/account/pool_core.go)
-- [internal/account/pool_acquire.go](file://internal/account/pool_acquire.go)
-- [internal/account/affinity.go](file://internal/account/affinity.go)
-- [internal/deepseek/client/proxy.go](file://internal/deepseek/client/proxy.go)
-- [internal/deepseek/transport/transport.go](file://internal/deepseek/transport/transport.go)
+- [internal/httpapi/admin/metrics/handler.go](file://internal/httpapi/admin/metrics/handler.go)
 - [internal/responsecache/cache.go](file://internal/responsecache/cache.go)
-- [internal/httpapi/openai/responses/cache_replay.go](file://internal/httpapi/openai/responses/cache_replay.go)
-- [internal/chathistory/sqlite_detail.go](file://internal/chathistory/sqlite_detail.go)
-- [internal/config/paths.go](file://internal/config/paths.go)
-- [config.example.json](file://config.example.json)
-- [docs/security-audit-2026-05-02.md](file://docs/security-audit-2026-05-02.md)
 </cite>
 
 ## 目录
+
 1. [简介](#简介)
 2. [项目结构](#项目结构)
 3. [核心组件](#核心组件)
 4. [架构总览](#架构总览)
 5. [详细组件分析](#详细组件分析)
-6. [依赖分析](#依赖分析)
-7. [性能考虑](#性能考虑)
-8. [故障排查指南](#故障排查指南)
-9. [结论](#结论)
+6. [故障排查指南](#故障排查指南)
+7. [结论](#结论)
 
 ## 简介
 
+运行运维关注服务是否启动、是否可被反代访问、账号池是否拥堵、缓存是否命中、历史记录是否正常写入，以及上游错误是否被正确分类。当前服务内置健康检查、队列状态、总览指标和历史记录查询。
 
 **章节来源**
-- [config.go:1-189](file://internal/config/config.go#L1-L189)
-- [store_load.go:1-116](file://internal/config/store_load.go#L1-L116)
-- [admin.go:40-70](file://internal/auth/admin.go#L40-L70)
+- [cmd/DeepSeek_Web_To_API/main.go](file://cmd/DeepSeek_Web_To_API/main.go)
+- [internal/httpapi/admin/metrics/handler.go](file://internal/httpapi/admin/metrics/handler.go)
 
 ## 项目结构
 
 ```mermaid
 graph TB
-subgraph "Config"
-CFG["config.Config<br/>config.go"]
-STORE["config.Store<br/>store.go"]
-VALID["validation.go<br/>配置校验"]
+subgraph "Probes"
+HEALTH["/healthz"]
+READY["/readyz"]
 end
-subgraph "Auth and Pool"
-AUTH["auth.Resolver<br/>request.go"]
-POOL["account.Pool<br/>pool_core.go"]
-AFF["Affinity<br/>affinity.go"]
+subgraph "Admin Metrics"
+QUEUE["/admin/queue/status"]
+OVERVIEW["/admin/metrics/overview"]
+HISTORY["/admin/chat-history"]
+VERSION["/admin/version"]
 end
-subgraph "Network"
-PROXY["proxy.go<br/>账号代理"]
-TLS["transport.go<br/>Safari TLS"]
+subgraph "Runtime"
+POOL["Account Pool"]
+CACHE["Response Cache Stats"]
+SQLITE["SQLite History Metrics"]
+SERVER["HTTP Server"]
 end
-subgraph "Cache"
-RCACHE["responsecache.Cache<br/>协议响应缓存"]
-RDISK["data/response_cache<br/>gzip 磁盘缓存"]
-end
-CFG --> STORE
-STORE --> VALID
-AUTH --> STORE
-AUTH --> POOL
-POOL --> AFF
-PROXY --> TLS
-AUTH --> PROXY
-AUTH --> RCACHE
-RCACHE --> RDISK
+HEALTH --> SERVER
+READY --> SERVER
+QUEUE --> POOL
+OVERVIEW --> CACHE
+OVERVIEW --> SQLITE
+HISTORY --> SQLITE
+VERSION --> SERVER
 ```
 
 **图表来源**
-- [config.go:1-189](file://internal/config/config.go#L1-L189)
-- [store.go:18-149](file://internal/config/store.go#L18-L149)
-- [request.go:37-139](file://internal/auth/request.go#L37-L139)
-- [pool_core.go:17-73](file://internal/account/pool_core.go#L17-L73)
-- [proxy.go:17-153](file://internal/deepseek/client/proxy.go#L17-L153)
-- [cache.go:26-32](file://internal/responsecache/cache.go#L26-L32)
-- [paths.go:60-66](file://internal/config/paths.go#L60-L66)
+- [internal/server/router.go](file://internal/server/router.go)
+- [internal/httpapi/admin/metrics/routes.go](file://internal/httpapi/admin/metrics/routes.go)
 
 **章节来源**
-- [config.example.json:1-76](file://config.example.json#L1-L76)
+- [internal/httpapi/admin/accounts/routes.go](file://internal/httpapi/admin/accounts/routes.go)
+- [internal/httpapi/admin/history/routes.go](file://internal/httpapi/admin/history/routes.go)
 
 ## 核心组件
 
-- `config.Config`：集中定义 API keys、accounts、proxies、model aliases、admin、runtime、compat、responses、embeddings、auto_delete、current_input_file 和 thinking_injection。
-- `config.Store`：提供线程安全快照、索引、更新、保存、导出和 env-backed 判断。
-- `auth.Resolver`：支持配置 API key 托管账号模式，也支持直传 DeepSeek token。
-- `account.Pool`：按账号并发与全局并发分配账号，支持等待队列和 target account。
-- `account.Affinity`：基于 caller、会话身份、system 和首个 user 内容生成亲缘键，让同一会话落到同一账号。
-- `proxy.go` 与 `transport.go`：为账号选择 SOCKS 代理，并用 Safari TLS 指纹 transport 调 DeepSeek。
-- `responsecache.Cache`：覆盖 OpenAI、Claude/Anthropic、Gemini 协议 POST 响应；内存缓存 5 分钟且最多 3.8GB，gzip 磁盘缓存 4 小时且最多 16GB。
+- 健康检查：`/healthz` 返回 `{"status":"ok"}`，`/readyz` 返回 `{"status":"ready"}`。
+- 账号池状态：返回总账号、可用账号、占用槽位、等待队列和推荐并发。
+- 总览指标：汇总历史、缓存、磁盘、内存、成本和请求耗时等运行数据。
+- 响应缓存指标：包含 lookups、hits、misses、memory_hits、disk_hits、uncacheable 原因和缓存容量。
+- 历史记录：用于分析成功率、失败原因、账号和模型分布。
 
 **章节来源**
-- [config.go:1-189](file://internal/config/config.go#L1-L189)
-- [store.go:18-149](file://internal/config/store.go#L18-L149)
-- [request.go:37-139](file://internal/auth/request.go#L37-L139)
-- [pool_acquire.go:9-142](file://internal/account/pool_acquire.go#L9-L142)
-- [affinity.go:19-160](file://internal/account/affinity.go#L19-L160)
-- [proxy.go:17-153](file://internal/deepseek/client/proxy.go#L17-L153)
-- [transport.go:24-113](file://internal/deepseek/transport/transport.go#L24-L113)
-- [cache.go:41-181](file://internal/responsecache/cache.go#L41-L181)
+- [internal/server/router.go](file://internal/server/router.go)
+- [internal/account/pool_core.go](file://internal/account/pool_core.go)
+- [internal/responsecache/cache.go](file://internal/responsecache/cache.go)
 
 ## 架构总览
 
 ```mermaid
 sequenceDiagram
-participant Req as HTTP Request
-participant Cache as responsecache.Cache
-participant Auth as auth.Resolver
-participant Pool as account.Pool
-participant Store as config.Store
-participant Client as DeepSeek Client
-Req->>Auth: Authorization / x-api-key
-Req->>Cache: 协议 POST 缓存查询
-Cache-->>Req: 命中则直接回放
-Auth->>Store: 判断 API key
-Auth->>Pool: 托管账号租约
-Pool-->>Auth: Account
-Auth-->>Client: RequestAuth
-Client->>Store: 读取代理与超时
-Client-->>Req: 上游执行结果
+participant Operator as Operator
+participant Admin as Admin API
+participant Queue as Account Pool
+participant Cache as Response Cache
+participant History as SQLite History
+participant WebUI as WebUI
+Operator->>WebUI: open overview
+WebUI->>Admin: /admin/queue/status
+Admin->>Queue: status
+WebUI->>Admin: /admin/metrics/overview
+Admin->>Cache: stats
+Admin->>History: metrics and recent rows
+Admin-->>WebUI: dashboard data
+WebUI-->>Operator: charts and cards
 ```
 
 **图表来源**
-- [cache.go:131-181](file://internal/responsecache/cache.go#L131-L181)
-- [request.go:37-139](file://internal/auth/request.go#L37-L139)
-- [pool_acquire.go:9-142](file://internal/account/pool_acquire.go#L9-L142)
-- [proxy.go:102-153](file://internal/deepseek/client/proxy.go#L102-L153)
+- [webui/src/features/overview/OverviewContainer.jsx](file://webui/src/features/overview/OverviewContainer.jsx)
+- [internal/httpapi/admin/metrics/handler.go](file://internal/httpapi/admin/metrics/handler.go)
 
 **章节来源**
-- [request.go:37-139](file://internal/auth/request.go#L37-L139)
+- [internal/httpapi/admin/metrics/deps.go](file://internal/httpapi/admin/metrics/deps.go)
 
 ## 详细组件分析
 
-### 配置加载
+### 成功率
 
+总览页基于历史记录计算成功率，并排除用户侧或边缘侧的 `401`、`403`、`502`、`504`、`524` 等状态，避免把调用方鉴权、网关超时或边缘失败混进上游成功率。
 
-### Admin 安全
+### 账号负载
 
-Admin 认证要求 `config.json` 中存在 `admin.key` 或 `admin.password_hash`，并要求 `admin.jwt_secret` 用于 JWT 签名；旧部署仍可用 `DEEPSEEK_WEB_TO_API_ADMIN_KEY` / `DEEPSEEK_WEB_TO_API_JWT_SECRET` 作为环境变量覆盖。密码更新会写入 bcrypt hash 并提升 `jwt_valid_after_unix`，强制旧 token 失效。
+账号负载 = 当前占用槽位 / 容量。容量优先使用全局并发上限，其次使用推荐并发，最后回退到账号数和每账号并发上限。
 
-### 账号与代理
+### 缓存命中率
 
-托管账号模式下，请求 token 若命中配置 API key，就从账号池获取账号并确保 DeepSeek token 可用；直传 token 模式不占用账号池。账号可绑定代理，代理支持 SOCKS 类型、认证和连通性测试。
-
-### 协议响应缓存
-
-
-### 运行数据权限
-
-运行时写回配置、聊天历史 SQLite、响应缓存、raw samples 和 testsuite artifacts 都按敏感数据处理。配置写回、测试日志、抓包样本和缓存文件默认使用 `0600` 文件权限；聊天历史、缓存和测试产物目录默认使用 `0700`。聊天历史详情写入 SQLite 前会 gzip 压缩到 BLOB，旧的未压缩详情会在启动时分批迁移并尝试 `VACUUM` 回收空间。响应缓存路径由规范化 SHA-256 key 派生，并在删除前验证仍位于缓存根目录，避免误删根目录外文件。
+缓存统计由 `responsecache.Cache.Stats()` 暴露，管理台展示命中次数、未命中次数、内存命中、磁盘命中和不可缓存原因。
 
 **章节来源**
-- [store_load.go:10-116](file://internal/config/store_load.go#L10-L116)
-- [validation.go:9-153](file://internal/config/validation.go#L9-L153)
-- [admin.go:40-288](file://internal/auth/admin.go#L40-L288)
-- [request.go:37-251](file://internal/auth/request.go#L37-L251)
-- [proxy.go:17-241](file://internal/deepseek/client/proxy.go#L17-L241)
-- [cache.go:184-208](file://internal/responsecache/cache.go#L184-L208)
-- [cache.go:210-272](file://internal/responsecache/cache.go#L210-L272)
-- [cache.go:281-512](file://internal/responsecache/cache.go#L281-L512)
-- [cache.go:435-512](file://internal/responsecache/cache.go#L435-L512)
-- [cache_replay.go:13-75](file://internal/httpapi/openai/responses/cache_replay.go#L13-L75)
-- [sqlite_detail.go](file://internal/chathistory/sqlite_detail.go)
-- [security-audit-2026-05-02.md](file://docs/security-audit-2026-05-02.md)
-
-## 依赖分析
-
-
-**章节来源**
-- [paths.go:60-66](file://internal/config/paths.go#L60-L66)
-- [config.example.json:1-76](file://config.example.json#L1-L76)
-- [docker-compose.yml:1-20](file://docker-compose.yml#L1-L20)
-
-## 性能考虑
-
-运行时吞吐由账号池、全局并发、代理延迟、DeepSeek 响应速度、历史写入和协议响应缓存命中率共同决定。`RuntimeAccountMaxInflight` 默认 2，`RuntimeTokenRefreshIntervalHours` 默认 6；代理 client 按配置缓存，避免每次请求重复构建 transport。聊天历史详情写入会增加一次 gzip 压缩 CPU 成本，但可显著降低长上下文历史的磁盘占用。协议响应缓存命中会绕过上游调用，内存命中最快，磁盘命中需要 gzip 解压和一次文件读取；缓存容量由 3.8GB 内存上限与 16GB 磁盘上限约束。
-
-**章节来源**
-- [store_accessors.go:85-160](file://internal/config/store_accessors.go#L85-L160)
-- [pool_core.go:17-73](file://internal/account/pool_core.go#L17-L73)
-- [proxy.go:102-153](file://internal/deepseek/client/proxy.go#L102-L153)
-- [cache.go:210-252](file://internal/responsecache/cache.go#L210-L252)
+- [webui/src/features/overview/OverviewContainer.jsx](file://webui/src/features/overview/OverviewContainer.jsx)
+- [internal/responsecache/cache.go](file://internal/responsecache/cache.go)
 
 ## 故障排查指南
 
-- `admin credential is missing`：在 `config.json` 设置 `admin.key` 或 `admin.password_hash`。
-- `admin.jwt_secret is required`：在 `config.json` 为 Admin JWT 设置强随机 secret。
-- `no accounts configured or all accounts are busy`：补充账号、降低并发、增加队列或检查账号 token 刷新失败。
-- 代理不可达：使用 Admin 代理测试或检查 host、port、type、username/password 和 DNS 解析。
-- 聊天历史库仍很大：确认服务日志是否出现 `SQLite compact after detail compression completed`；如果出现 compact 失败，通常是剩余磁盘空间不足或数据库正忙，新写入仍会压缩，库文件缩小需要下次成功 `VACUUM`。
-- 缓存未命中：检查请求体、模型、协议归一路径、`X-DeepSeek-Web-To-API-Target-Account`、`Anthropic-Version`、`Anthropic-Beta`、`Cache-Control` 是否发生变化；命中响应会带 `X-DeepSeek-Web-To-API-Cache`。
+- 成功率突然下降：先按历史记录状态码、错误详情、账号、模型维度分组，再确认是否为用户侧排除状态或上游错误。
+- 缓存命中下降：检查请求体是否每次变化、是否跨调用方、是否被 `Cache-Control` 绕过。
+- 账号负载一直 0：确认是否真实有 in-flight 请求；短请求结束后占用槽位会快速释放。
+- 等待队列长期增加：增大账号数量、每账号并发或全局并发，或排查账号登录失败。
 
 **章节来源**
-- [admin.go:40-70](file://internal/auth/admin.go#L40-L70)
-- [request.go:37-139](file://internal/auth/request.go#L37-L139)
-- [proxy.go:155-241](file://internal/deepseek/client/proxy.go#L155-L241)
-- [cache.go:184-208](file://internal/responsecache/cache.go#L184-L208)
-- [cache.go:544-572](file://internal/responsecache/cache.go#L544-L572)
+- [internal/account/pool_core.go](file://internal/account/pool_core.go)
+- [internal/auth/request.go](file://internal/auth/request.go)
 
 ## 结论
 
-运行治理的核心是“配置集中、凭证外置、账号租约明确、代理可验证、上游请求可回退”。改动运行时参数时，应同步更新 `config.example.json`、部署文档和 Admin WebUI 设置页，避免配置项存在但用户无法发现或无法安全修改。
+当前运维入口集中在管理台总览、历史记录和健康探针。排查时应先区分用户侧错误、代理/边缘错误、账号池拥堵和 DeepSeek 上游错误，再决定是否调配置或修代码。
 
 **章节来源**
-- [config.go:1-189](file://internal/config/config.go#L1-L189)
-- [Admin WebUI System.md](file://docs/Admin%20WebUI%20System/Admin%20WebUI%20System.md)
+- [docs/storage-cache.md](file://docs/storage-cache.md)

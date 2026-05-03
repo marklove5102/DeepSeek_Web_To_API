@@ -1,184 +1,148 @@
-# Admin WebUI System
+# Admin WebUI 系统
 
 <cite>
 **本文档引用的文件**
-- [internal/httpapi/admin/handler.go](file://internal/httpapi/admin/handler.go)
-- [internal/httpapi/admin/auth/routes.go](file://internal/httpapi/admin/auth/routes.go)
-- [internal/httpapi/admin/configmgmt/routes.go](file://internal/httpapi/admin/configmgmt/routes.go)
-- [internal/httpapi/admin/accounts/routes.go](file://internal/httpapi/admin/accounts/routes.go)
-- [internal/httpapi/admin/proxies/routes.go](file://internal/httpapi/admin/proxies/routes.go)
-- [internal/httpapi/admin/settings/routes.go](file://internal/httpapi/admin/settings/routes.go)
-- [internal/httpapi/admin/history/routes.go](file://internal/httpapi/admin/history/routes.go)
-- [internal/httpapi/admin/metrics/routes.go](file://internal/httpapi/admin/metrics/routes.go)
-- [webui/src/main.jsx](file://webui/src/main.jsx)
 - [webui/src/app/AppRoutes.jsx](file://webui/src/app/AppRoutes.jsx)
 - [webui/src/layout/DashboardShell.jsx](file://webui/src/layout/DashboardShell.jsx)
-- [webui/src/features/settings/SettingsContainer.jsx](file://webui/src/features/settings/SettingsContainer.jsx)
-- [webui/src/features/chatHistory/ChatHistoryContainer.jsx](file://webui/src/features/chatHistory/ChatHistoryContainer.jsx)
+- [webui/src/features/overview/OverviewContainer.jsx](file://webui/src/features/overview/OverviewContainer.jsx)
+- [internal/httpapi/admin/handler.go](file://internal/httpapi/admin/handler.go)
+- [internal/httpapi/admin/auth/routes.go](file://internal/httpapi/admin/auth/routes.go)
+- [internal/webui/build.go](file://internal/webui/build.go)
 </cite>
 
 ## 目录
+
 1. [简介](#简介)
 2. [项目结构](#项目结构)
 3. [核心组件](#核心组件)
 4. [架构总览](#架构总览)
 5. [详细组件分析](#详细组件分析)
-6. [依赖分析](#依赖分析)
-7. [性能考虑](#性能考虑)
-8. [故障排查指南](#故障排查指南)
-9. [结论](#结论)
+6. [故障排查指南](#故障排查指南)
+7. [结论](#结论)
 
 ## 简介
 
-Admin WebUI System 由 Go Admin API 与 React 管理台组成。它提供登录校验、配置读写、账号/API key 管理、代理管理、API 测试、聊天历史、运行指标、版本信息和开发采集入口。前端在生产模式挂载到 `/admin`，本地开发模式保留 landing page 与 `/admin/*` 路由。
+Admin WebUI 是内置管理台，负责日常运维操作：查看总览、管理账号和代理、测试 API、查看历史记录、批量导入配置、修改运行设置。前端由 React/Vite 构建，后端由 Go 静态托管。
 
 **章节来源**
-- [handler.go:1-69](file://internal/httpapi/admin/handler.go#L1-L69)
-- [main.jsx:1-18](file://webui/src/main.jsx#L1-L18)
-- [AppRoutes.jsx:11-77](file://webui/src/app/AppRoutes.jsx#L11-L77)
+- [webui/package.json](file://webui/package.json)
+- [internal/webui/build.go](file://internal/webui/build.go)
 
 ## 项目结构
 
 ```mermaid
 graph TB
-subgraph "Backend Admin API"
-ADMIN["admin/handler.go"]
-AUTH["auth/routes.go"]
-CFG["configmgmt/routes.go"]
-ACC["accounts/routes.go"]
-PROXY["proxies/routes.go"]
-SET["settings/routes.go"]
-HIST["history/routes.go"]
-MET["metrics/routes.go"]
-end
 subgraph "Frontend"
-ROUTES["AppRoutes.jsx"]
-SHELL["DashboardShell.jsx"]
-FEATURES["features/*"]
+APP["AppRoutes.jsx<br/>路由与鉴权"]
+SHELL["DashboardShell.jsx<br/>布局与导航"]
+OVERVIEW["OverviewContainer.jsx<br/>总览指标"]
+FEATURES["features/*<br/>账号 代理 测试 历史 设置"]
 end
-ADMIN --> AUTH
-ADMIN --> CFG
-ADMIN --> ACC
-ADMIN --> PROXY
-ADMIN --> SET
-ADMIN --> HIST
-ADMIN --> MET
-ROUTES --> SHELL
+subgraph "Backend Admin"
+HANDLER["admin/handler.go<br/>模块装配"]
+AUTH["auth/routes.go<br/>登录校验"]
+ACCOUNTS["accounts/routes.go"]
+CONFIG["configmgmt/routes.go"]
+METRICS["metrics/routes.go"]
+HISTORY["history/routes.go"]
+end
+APP --> SHELL
+SHELL --> OVERVIEW
 SHELL --> FEATURES
+FEATURES --> HANDLER
+HANDLER --> AUTH
+HANDLER --> ACCOUNTS
+HANDLER --> CONFIG
+HANDLER --> METRICS
+HANDLER --> HISTORY
 ```
 
 **图表来源**
-- [handler.go:28-57](file://internal/httpapi/admin/handler.go#L28-L57)
-- [AppRoutes.jsx:11-77](file://webui/src/app/AppRoutes.jsx#L11-L77)
-- [DashboardShell.jsx:18-181](file://webui/src/layout/DashboardShell.jsx#L18-L181)
+- [webui/src/app/AppRoutes.jsx](file://webui/src/app/AppRoutes.jsx)
+- [webui/src/layout/DashboardShell.jsx](file://webui/src/layout/DashboardShell.jsx)
+- [internal/httpapi/admin/handler.go](file://internal/httpapi/admin/handler.go)
 
 **章节来源**
-- [handler.go:1-69](file://internal/httpapi/admin/handler.go#L1-L69)
+- [internal/httpapi/admin/accounts/routes.go](file://internal/httpapi/admin/accounts/routes.go)
+- [internal/httpapi/admin/configmgmt/routes.go](file://internal/httpapi/admin/configmgmt/routes.go)
 
 ## 核心组件
 
-- Admin API root：构造各资源 handler，并把除 login/verify 外的路由放入 `RequireAdmin` 保护组。
-- Auth routes：`POST /admin/login` 与 `GET /admin/verify`。
-- Config routes：读取、更新、导入、导出配置和 API key 管理。
-- Accounts routes：账号 CRUD、队列状态、账号测试、批量测试、删除远端会话。
-- Proxies routes：代理 CRUD、代理测试、账号代理绑定。
-- Settings routes：运行设置读取、更新和 Admin 密码更新。
-- WebUI shell：侧边栏、状态卡片、懒加载功能模块和统一 `authFetch`。
+- `AppRoutes`：负责生产/开发路由、登录态、配置拉取和进入仪表盘。
+- `DashboardShell`：负责侧边导航、状态卡片、版本信息和子页面挂载。
+- `OverviewContainer`：负责队列、历史、指标聚合，显示成功率、缓存命中率、账号负载等。
+- Admin API：按领域拆分为 auth、accounts、configmgmt、settings、proxies、history、metrics、version 等模块。
+- `webui.EnsureBuiltOnStartup`：静态文件缺失且允许自动构建时，启动时执行 `npm ci` 和 `npm run build`。
 
 **章节来源**
-- [handler.go:28-57](file://internal/httpapi/admin/handler.go#L28-L57)
-- [auth/routes.go:13-15](file://internal/httpapi/admin/auth/routes.go#L13-L15)
-- [configmgmt/routes.go:9-18](file://internal/httpapi/admin/configmgmt/routes.go#L9-L18)
-- [accounts/routes.go:12-21](file://internal/httpapi/admin/accounts/routes.go#L12-L21)
-- [proxies/routes.go:9-15](file://internal/httpapi/admin/proxies/routes.go#L9-L15)
-- [settings/routes.go:9-12](file://internal/httpapi/admin/settings/routes.go#L9-L12)
-- [DashboardShell.jsx:50-181](file://webui/src/layout/DashboardShell.jsx#L50-L181)
+- [webui/src/app/AppRoutes.jsx](file://webui/src/app/AppRoutes.jsx)
+- [webui/src/layout/DashboardShell.jsx](file://webui/src/layout/DashboardShell.jsx)
+- [webui/src/features/overview/OverviewContainer.jsx](file://webui/src/features/overview/OverviewContainer.jsx)
+- [internal/webui/build.go](file://internal/webui/build.go)
 
 ## 架构总览
 
 ```mermaid
 sequenceDiagram
-participant UI as React WebUI
-participant Auth as useAdminAuth
-participant API as Admin API
-participant Store as config.Store
-participant Pool as account.Pool
-UI->>Auth: 读取本地 token
-Auth->>API: /admin/verify
-UI->>API: /admin/settings / accounts / proxies
-API->>Store: 读取或更新配置
-API->>Pool: 队列状态或账号测试
-API-->>UI: JSON 结果
+participant Browser as Browser
+participant WebUI as React WebUI
+participant Admin as Admin API
+participant Auth as Admin Auth
+participant Store as Config Store
+participant Metrics as Metrics
+Browser->>WebUI: open /admin
+WebUI->>Admin: POST /admin/login
+Admin->>Auth: verify admin key/password
+Auth-->>WebUI: JWT
+WebUI->>Admin: authenticated requests
+Admin->>Store: read/write config
+Admin->>Metrics: overview data
+Admin-->>WebUI: JSON
+WebUI-->>Browser: dashboard
 ```
 
 **图表来源**
-- [useAdminAuth.js:1-64](file://webui/src/app/useAdminAuth.js#L1-L64)
-- [settings/routes.go:9-12](file://internal/httpapi/admin/settings/routes.go#L9-L12)
-- [accounts/routes.go:12-21](file://internal/httpapi/admin/accounts/routes.go#L12-L21)
+- [internal/httpapi/admin/auth/routes.go](file://internal/httpapi/admin/auth/routes.go)
+- [internal/httpapi/admin/metrics/routes.go](file://internal/httpapi/admin/metrics/routes.go)
+- [webui/src/app/useAdminAuth.js](file://webui/src/app/useAdminAuth.js)
 
 **章节来源**
-- [SettingsContainer.jsx:1-105](file://webui/src/features/settings/SettingsContainer.jsx#L1-L105)
-- [AccountManagerContainer.jsx:1-181](file://webui/src/features/account/AccountManagerContainer.jsx#L1-L181)
+- [internal/httpapi/admin/settings/routes.go](file://internal/httpapi/admin/settings/routes.go)
+- [internal/httpapi/admin/history/routes.go](file://internal/httpapi/admin/history/routes.go)
 
 ## 详细组件分析
 
-### 管理路由保护
+### 页面结构
 
-`admin.RegisterRoutes` 先注册公开登录/验证路由，再创建受 `RequireAdmin` 保护的 group。配置、设置、代理、账号、raw samples、dev capture、history、version 和 metrics 都在保护组内。
+管理台当前包含：总览、账号、代理、测试、历史、导入、设置。页面文案支持中英文，翻译资源在 `webui/src/locales`。
 
-### 前端路由
+### 总览指标
 
-`AppRoutes` 负责判断生产/本地 basename、Admin 路由鉴权状态、登录态、DashboardShell 和 Login 的切换。`DashboardShell` 维护 tab 导航，并按需懒加载 overview、accounts、proxies、test、history、import 和 settings。
+总览页周期性请求 `/admin/queue/status`、`/admin/chat-history` 和 `/admin/metrics/overview`。成功率排除用户侧的 `401`、`403`、`502`、`504`、`524` 等状态，缓存命中率来自响应缓存统计。
 
-### 管理功能
+### 静态托管
 
-账号页面组合 queue cards、API key panel、accounts table 和增删改 modal。设置页面组合 security、runtime、behavior、current input file、compatibility、auto delete、model aliases 和 backup。总览页定时拉取队列、历史与 metrics。
-
-**章节来源**
-- [handler.go:28-57](file://internal/httpapi/admin/handler.go#L28-L57)
-- [AppRoutes.jsx:11-77](file://webui/src/app/AppRoutes.jsx#L11-L77)
-- [DashboardShell.jsx:18-181](file://webui/src/layout/DashboardShell.jsx#L18-L181)
-- [AccountManagerContainer.jsx:1-181](file://webui/src/features/account/AccountManagerContainer.jsx#L1-L181)
-- [SettingsContainer.jsx:1-105](file://webui/src/features/settings/SettingsContainer.jsx#L1-L105)
-- [OverviewContainer.jsx:170-254](file://webui/src/features/overview/OverviewContainer.jsx#L170-L254)
-
-## 依赖分析
-
-Admin WebUI 后端依赖 `config.Store`、`account.Pool`、`deepseek.Client`、OpenAI chat caller 和 chat history store。前端依赖 React、React Router、lucide-react、clsx 和 i18n 文案文件。构建产物由 `internal/webui` 托管。
+生产模式下 Go 服务托管 `static/admin`。如果静态文件不存在且配置允许，启动时会自动构建 WebUI。
 
 **章节来源**
-- [handler.go:16-26](file://internal/httpapi/admin/handler.go#L16-L26)
-- [webui/package.json:1-27](file://webui/package.json#L1-L27)
-- [internal/webui/handler.go:20-127](file://internal/webui/handler.go#L20-L127)
-
-## 性能考虑
-
-前端功能模块使用 `React.lazy` 延迟加载，避免首次进入管理台加载所有页面。总览页定时刷新队列、历史和 metrics，需要控制刷新频率和历史条目规模。后端历史列表支持 ETag，运行态聊天历史使用 SQLite summary 分页；完整详情写入前压缩为 gzip `detail_blob`，列表接口不会读取完整大对象。
-
-**章节来源**
-- [DashboardShell.jsx:18-181](file://webui/src/layout/DashboardShell.jsx#L18-L181)
-- [OverviewContainer.jsx:170-254](file://webui/src/features/overview/OverviewContainer.jsx#L170-L254)
-- [history/handler_chat_history.go:1-120](file://internal/httpapi/admin/history/handler_chat_history.go#L1-L120)
-- [sqlite_store.go:31-190](file://internal/chathistory/sqlite_store.go#L31-L190)
-- [sqlite_detail.go:15-169](file://internal/chathistory/sqlite_detail.go#L15-L169)
-- [chathistory/store.go:534-621](file://internal/chathistory/store.go#L534-L621)
+- [webui/src/features/overview/OverviewContainer.jsx](file://webui/src/features/overview/OverviewContainer.jsx)
+- [internal/httpapi/admin/metrics/handler.go](file://internal/httpapi/admin/metrics/handler.go)
+- [internal/webui/handler.go](file://internal/webui/handler.go)
 
 ## 故障排查指南
 
-- 登录后立刻退出：检查 JWT 过期、`jwt_valid_after_unix`、`admin.jwt_secret` 和本地 token 存储。
-- 设置保存不生效：检查配置是否 env-backed 且当前环境禁止写回。
-- 页面数据为空：检查对应 Admin API 是否 401、500 或配置为空。
-- WebUI 刷新 404：检查 `/admin/*` fallback 是否正确命中静态 `index.html`。
+- 页面仍显示旧内容：确认浏览器缓存、`static/admin` 是否已重新构建、服务是否重启。
+- 登录后立刻退出：检查 Admin JWT secret、JWT 过期时间和系统时间。
+- 总览数据为 0：检查 `/admin/metrics/overview`、`/admin/queue/status` 是否返回 200。
+- WebUI 自动构建失败：确认部署环境有 npm，或提前构建并复制 `static/admin`。
 
 **章节来源**
-- [useAdminAuth.js:1-64](file://webui/src/app/useAdminAuth.js#L1-L64)
-- [store.go:131-171](file://internal/config/store.go#L131-L171)
-- [internal/webui/handler.go:28-127](file://internal/webui/handler.go#L28-L127)
+- [internal/webui/build.go](file://internal/webui/build.go)
+- [webui/src/app/useAdminAuth.js](file://webui/src/app/useAdminAuth.js)
 
 ## 结论
 
-Admin WebUI 是运行治理的用户界面，不应绕开 `config.Store`、`auth`、`account.Pool` 或现有 Admin API 直接操作运行状态。新增管理功能时，应先补后端受保护路由，再在前端接入 `authFetch`、i18n 和统一消息反馈。
+Admin WebUI 是当前项目的控制面，不只是静态页面。它与后端 Admin API 强绑定，文档和部署步骤必须同时覆盖前端构建产物与后端管理接口。
 
 **章节来源**
-- [handler.go:28-57](file://internal/httpapi/admin/handler.go#L28-L57)
-- [DashboardShell.jsx:50-181](file://webui/src/layout/DashboardShell.jsx#L50-L181)
+- [internal/httpapi/admin/handler.go](file://internal/httpapi/admin/handler.go)

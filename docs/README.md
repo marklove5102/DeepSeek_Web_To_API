@@ -3,18 +3,14 @@
 <cite>
 **本文档引用的文件**
 - [README.MD](file://README.MD)
+- [API.md](file://API.md)
+- [config.example.json](file://config.example.json)
+- [cmd/DeepSeek_Web_To_API/main.go](file://cmd/DeepSeek_Web_To_API/main.go)
 - [internal/server/router.go](file://internal/server/router.go)
-- [internal/promptcompat/request_normalize.go](file://internal/promptcompat/request_normalize.go)
-- [docs/Project Overview/Project Overview.md](file://docs/Project%20Overview/Project%20Overview.md)
-- [docs/Architecture Design/Architecture Design.md](file://docs/Architecture%20Design/Architecture%20Design.md)
-- [docs/API Compatibility System/API Compatibility System.md](file://docs/API%20Compatibility%20System/API%20Compatibility%20System.md)
-- [docs/Runtime Operations/Runtime Operations.md](file://docs/Runtime%20Operations/Runtime%20Operations.md)
-- [docs/Admin WebUI System/Admin WebUI System.md](file://docs/Admin%20WebUI%20System/Admin%20WebUI%20System.md)
-- [docs/Testing and Delivery/Testing and Delivery.md](file://docs/Testing%20and%20Delivery/Testing%20and%20Delivery.md)
-- [docs/security-audit-2026-05-02.md](file://docs/security-audit-2026-05-02.md)
 </cite>
 
 ## 目录
+
 1. [简介](#简介)
 2. [项目结构](#项目结构)
 3. [核心组件](#核心组件)
@@ -24,124 +20,161 @@
 
 ## 简介
 
-本文档是 DeepSeek_Web_To_API 的统一文档入口。DeepSeek_Web_To_API 是一个以 Go 为主的 DeepSeek Web 对话兼容网关，对外提供 OpenAI Chat Completions、OpenAI Responses、Claude Messages、Gemini GenerateContent、Admin API 与 WebUI；对内把结构化协议请求归一为 DeepSeek 网页对话可消费的 prompt、文件引用和运行时控制位。
+本目录是 DeepSeek_Web_To_API 的当前文档入口，内容以现有 Go 后端、React 管理台、SQLite 历史记录、gzip 响应缓存和多协议兼容实现为准。旧仓库来源、旧部署平台和不再存在的启动文件不再作为文档依据。
 
-重整后的主文档集按全局文档规则拆成模块目录，每个目录包含同名概览文档。旧有专题文档仍保留为历史资料或专项补充，新的阅读入口以本页和下方模块为准。
+推荐阅读顺序：
+
+- 新用户先看 [根目录 README](file://README.MD) 和 [API 文档](file://API.md)。
+- 运维部署看 [配置说明](file://docs/configuration.md)、[部署运维](file://docs/deployment.md)、[安全说明](file://docs/security.md)。
+- 开发者看 [项目总览](file://docs/Project%20Overview/Project%20Overview.md)、[架构设计](file://docs/Architecture%20Design/Architecture%20Design.md)、[API 兼容系统](file://docs/API%20Compatibility%20System/API%20Compatibility%20System.md)。
+- 调试 Claude Code、Codex、OpenAI SDK、Gemini SDK 兼容性时看 [Prompt 兼容流程](file://docs/prompt-compatibility.md) 和 [工具调用语义](file://docs/toolcall-semantics.md)。
 
 **章节来源**
-- [router.go:41-105](file://internal/server/router.go#L41-L105)
-- [request_normalize.go:16-156](file://internal/promptcompat/request_normalize.go#L16-L156)
-- [Project Overview.md](file://docs/Project%20Overview/Project%20Overview.md)
+- [README.MD](file://README.MD)
+- [API.md](file://API.md)
 
 ## 项目结构
 
 ```mermaid
 graph TB
-subgraph "Documentation Entry"
-DOCS["docs/README.md<br/>统一导航"]
-ROOT["README.MD<br/>用户快速入口"]
-API["API.md<br/>接口入口"]
+subgraph "Entry"
+MAIN["cmd/DeepSeek_Web_To_API/main.go<br/>程序入口"]
+CONFIG["config.example.json<br/>单文件配置模板"]
 end
-subgraph "Modular Docs"
-OV["Project Overview<br/>项目总览"]
-AD["Architecture Design<br/>架构设计"]
-AC["API Compatibility System<br/>协议兼容"]
-RO["Runtime Operations<br/>运行运维"]
-AW["Admin WebUI System<br/>管理台"]
-TD["Testing and Delivery<br/>测试交付"]
+subgraph "Backend"
+SERVER["internal/server/router.go<br/>路由与中间件"]
+HTTPAPI["internal/httpapi<br/>OpenAI Claude Gemini Admin"]
+DEEPSEEK["internal/deepseek<br/>上游客户端"]
+ACCOUNT["internal/account<br/>账号池"]
 end
-DOCS --> OV
-DOCS --> AD
-DOCS --> AC
-DOCS --> RO
-DOCS --> AW
-DOCS --> TD
-ROOT --> DOCS
-API --> AC
+subgraph "State"
+HISTORY["internal/chathistory<br/>SQLite 历史记录"]
+CACHE["internal/responsecache<br/>内存和磁盘缓存"]
+end
+subgraph "Frontend"
+WEBUI["webui<br/>React 管理台源码"]
+STATIC["static/admin<br/>构建产物"]
+end
+MAIN --> SERVER
+SERVER --> HTTPAPI
+SERVER --> ACCOUNT
+SERVER --> HISTORY
+SERVER --> CACHE
+HTTPAPI --> DEEPSEEK
+WEBUI --> STATIC
 ```
 
 **图表来源**
-- [docs/Project Overview/Project Overview.md](file://docs/Project%20Overview/Project%20Overview.md)
-- [docs/Architecture Design/Architecture Design.md](file://docs/Architecture%20Design/Architecture%20Design.md)
-- [docs/API Compatibility System/API Compatibility System.md](file://docs/API%20Compatibility%20System/API%20Compatibility%20System.md)
+- [cmd/DeepSeek_Web_To_API/main.go](file://cmd/DeepSeek_Web_To_API/main.go)
+- [internal/server/router.go](file://internal/server/router.go)
+- [webui/package.json](file://webui/package.json)
 
 **章节来源**
-- [docs/Project Overview/Project Overview.md](file://docs/Project%20Overview/Project%20Overview.md)
-- [docs/Architecture Design/Architecture Design.md](file://docs/Architecture%20Design/Architecture%20Design.md)
+- [internal/server/router.go](file://internal/server/router.go)
+- [internal/chathistory/sqlite_store.go](file://internal/chathistory/sqlite_store.go)
+- [internal/responsecache/cache.go](file://internal/responsecache/cache.go)
 
 ## 核心组件
 
-- `Project Overview`：解释项目定位、部署入口、对外能力和读者路径。
-- `Architecture Design`：以源码目录、路由树、协议 surface、运行时依赖为主线描述整体结构。
-- `API Compatibility System`：集中说明 OpenAI、Claude、Gemini 到 DeepSeek 网页对话的兼容链路。
-- `Runtime Operations`：覆盖配置、鉴权、账号池、代理、上游 DeepSeek client、部署与安全运行边界。
-- `Admin WebUI System`：覆盖 Admin API、React 管理台、配置热更新、账号/代理/历史/指标页面。
-- `Testing and Delivery`：覆盖 Go、Node、WebUI、脚本门禁、fixture 和发布门禁。
-- `security-audit-2026-05-02.md`：记录本轮安全类 Skill 扫描、修复项、误报说明和复跑命令。
+- `cmd/DeepSeek_Web_To_API/main.go`：加载 `.env`、读取配置、创建服务、构建 WebUI、校验管理端安全配置，并启动 HTTP Server。
+- `internal/server/router.go`：统一挂载 OpenAI、Claude、Gemini、Admin、WebUI、健康检查和中间件。
+- `internal/config`：负责单文件配置、环境变量覆盖、校验、导入导出和运行时访问器。
+- `internal/account` 与 `internal/auth`：负责账号池、API Key 识别、直通 token、会话亲和与并发限制。
+- `internal/responsecache`：负责协议响应缓存，内存层与 gzip 磁盘层共享同一缓存键规则。
+- `internal/chathistory`：负责 SQLite 历史记录、旧 JSON 导入、保留数量、详情压缩和指标。
+- `webui`：React/Vite 管理台，构建后由 Go 服务静态托管。
 
 **章节来源**
-- [server/router.go:41-105](file://internal/server/router.go#L41-L105)
-- [webui/src/layout/DashboardShell.jsx:50-181](file://webui/src/layout/DashboardShell.jsx#L50-L181)
-- [tests/scripts/run-unit-all.sh:1-8](file://tests/scripts/run-unit-all.sh#L1-L8)
+- [cmd/DeepSeek_Web_To_API/main.go](file://cmd/DeepSeek_Web_To_API/main.go)
+- [internal/config/config.go](file://internal/config/config.go)
+- [internal/account/pool_core.go](file://internal/account/pool_core.go)
+- [internal/auth/request.go](file://internal/auth/request.go)
 
 ## 架构总览
 
 ```mermaid
 graph TB
-subgraph "Client Surface"
-OA["OpenAI<br/>/v1/chat /v1/responses"]
-CL["Claude<br/>/anthropic/v1/messages"]
-GE["Gemini<br/>/v1beta/models"]
-ADMIN["Admin WebUI<br/>/admin"]
+subgraph "Clients"
+OPENAI["OpenAI SDK / Codex"]
+CLAUDE["Claude Code / Anthropic SDK"]
+GEMINI["Gemini SDK"]
+ADMINUSER["管理员浏览器"]
 end
-subgraph "Go Runtime"
-ROUTER["internal/server/router.go<br/>chi router"]
-COMPAT["internal/promptcompat<br/>标准化与 prompt"]
-STREAM["internal/stream + internal/sse<br/>SSE 消费"]
-TOOLS["internal/toolcall + toolstream<br/>工具调用"]
+subgraph "DeepSeek_Web_To_API"
+ROUTER["chi Router<br/>CORS Security Headers UTF-8"]
+OPENAIAPI["OpenAI Surface"]
+CLAUDEAPI["Claude Surface"]
+GEMINIAPI["Gemini Surface"]
+ADMINAPI["Admin API"]
+AUTH["Auth Resolver<br/>API Key Direct Token Session Affinity"]
+POOL["Account Pool<br/>Queue Inflight Limit"]
+CACHE["Response Cache<br/>Memory + gzip Disk"]
+HISTORY["Chat History<br/>SQLite + gzip Details"]
+DS["DeepSeek Client"]
+WEB["Admin WebUI"]
 end
-subgraph "Upstream"
-DS["internal/deepseek/client<br/>DeepSeek Web API"]
+subgraph "External"
+UPSTREAM["DeepSeek Web Upstream"]
 end
-OA --> ROUTER
-CL --> ROUTER
-GE --> ROUTER
-ADMIN --> ROUTER
-ROUTER --> COMPAT
-COMPAT --> STREAM
-STREAM --> TOOLS
-STREAM --> DS
+OPENAI --> ROUTER
+CLAUDE --> ROUTER
+GEMINI --> ROUTER
+ADMINUSER --> WEB
+WEB --> ADMINAPI
+ROUTER --> CACHE
+ROUTER --> OPENAIAPI
+ROUTER --> CLAUDEAPI
+ROUTER --> GEMINIAPI
+OPENAIAPI --> AUTH
+CLAUDEAPI --> AUTH
+GEMINIAPI --> AUTH
+AUTH --> POOL
+OPENAIAPI --> HISTORY
+CLAUDEAPI --> HISTORY
+OPENAIAPI --> DS
+CLAUDEAPI --> DS
+GEMINIAPI --> DS
+DS --> UPSTREAM
 ```
 
 **图表来源**
-- [router.go:41-105](file://internal/server/router.go#L41-L105)
-- [request_normalize.go:16-156](file://internal/promptcompat/request_normalize.go#L16-L156)
-- [engine.go:21-146](file://internal/stream/engine.go#L21-L146)
-- [client_completion.go:15-89](file://internal/deepseek/client/client_completion.go#L15-L89)
+- [internal/server/router.go](file://internal/server/router.go)
+- [internal/httpapi/admin/handler.go](file://internal/httpapi/admin/handler.go)
+- [internal/deepseek/client/client_core.go](file://internal/deepseek/client/client_core.go)
 
 **章节来源**
-- [Architecture Design.md](file://docs/Architecture%20Design/Architecture%20Design.md)
-- [API Compatibility System.md](file://docs/API%20Compatibility%20System/API%20Compatibility%20System.md)
+- [internal/server/router.go](file://internal/server/router.go)
+- [internal/httpapi/openai/chat/handler.go](file://internal/httpapi/openai/chat/handler.go)
+- [internal/httpapi/claude/handler_routes.go](file://internal/httpapi/claude/handler_routes.go)
+- [internal/httpapi/gemini/handler_routes.go](file://internal/httpapi/gemini/handler_routes.go)
 
 ## 详细组件分析
 
-### 推荐阅读顺序
+### 文档清单
 
-首次接触项目时，从 `Project Overview` 开始，再读 `Architecture Design`。如果正在改协议兼容、tool call、prompt、SSE 或文件引用，优先读 `API Compatibility System` 和 `prompt-compatibility.md`。如果正在部署、排障、改配置或 Admin 管理台，则读 `Runtime Operations` 与 `Admin WebUI System`。
-
-### 旧文档位置
-
-`docs/CONTRIBUTING.md`、`docs/DEPLOY.md`、`docs/TESTING.md`、`docs/security-audit-2026-05-02.md`、`docs/toolcall-semantics.md`、`docs/DeepSeekSSE行为结构说明-2026-04-05.md` 仍保留。新主文档给出架构级入口，旧专题继续承载细节、历史观察、安全审计和对外补充说明。
+| 文档 | 用途 |
+| --- | --- |
+| [configuration.md](file://docs/configuration.md) | 单文件配置、环境变量覆盖、默认值和安全要求 |
+| [deployment.md](file://docs/deployment.md) | 本地、Docker、二进制、反代部署 |
+| [storage-cache.md](file://docs/storage-cache.md) | SQLite 历史记录与响应缓存 |
+| [security.md](file://docs/security.md) | 鉴权、输入校验、敏感数据与部署边界 |
+| [Project Overview](file://docs/Project%20Overview/Project%20Overview.md) | 项目模块总览 |
+| [Architecture Design](file://docs/Architecture%20Design/Architecture%20Design.md) | 系统架构与请求链路 |
+| [API Compatibility System](file://docs/API%20Compatibility%20System/API%20Compatibility%20System.md) | OpenAI/Claude/Gemini 兼容层 |
+| [Admin WebUI System](file://docs/Admin%20WebUI%20System/Admin%20WebUI%20System.md) | 管理台与 Admin API |
+| [Runtime Operations](file://docs/Runtime%20Operations/Runtime%20Operations.md) | 运维指标、日志、故障处理 |
+| [Testing and Delivery](file://docs/Testing%20and%20Delivery/Testing%20and%20Delivery.md) | 测试脚本、CI 和发布产物 |
+| [prompt-compatibility.md](file://docs/prompt-compatibility.md) | API 消息到网页纯文本上下文的兼容流程 |
+| [toolcall-semantics.md](file://docs/toolcall-semantics.md) | 工具调用解析、修复和流式输出语义 |
 
 **章节来源**
-- [prompt-compatibility.md](file://docs/prompt-compatibility.md)
-- [toolcall-semantics.md](file://docs/toolcall-semantics.md)
-- [TESTING.md](file://docs/TESTING.md)
+- [AGENTS.md](file://AGENTS.md)
+- [docs/prompt-compatibility.md](file://docs/prompt-compatibility.md)
 
 ## 结论
 
-DeepSeek_Web_To_API 的文档现在按“总览、架构、协议兼容、运行运维、管理台、测试交付”六个主模块组织。这样的拆分让源码入口、协议行为、运维配置和测试门禁各自有稳定归属，后续修改业务逻辑时应同步更新对应模块，而不是把同一段说明复制到多个文件。
+新的文档体系只描述当前项目实际存在的 Go 后端、React 管理台、Docker/GHCR 发布、SQLite 历史记录和多协议兼容实现。旧项目名称、旧仓库归属、旧部署入口和历史贡献者内容不再出现在文档体系内。
 
 **章节来源**
-- [router.go:41-105](file://internal/server/router.go#L41-L105)
-- [docs/Architecture Design/Architecture Design.md](file://docs/Architecture%20Design/Architecture%20Design.md)
+- [README.MD](file://README.MD)
+- [API.md](file://API.md)

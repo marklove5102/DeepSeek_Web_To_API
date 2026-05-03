@@ -1,203 +1,148 @@
-# API Compatibility System
+# API 兼容系统
 
 <cite>
 **本文档引用的文件**
 - [internal/server/router.go](file://internal/server/router.go)
-- [internal/responsecache/cache.go](file://internal/responsecache/cache.go)
-- [internal/httpapi/openai/responses/cache_replay.go](file://internal/httpapi/openai/responses/cache_replay.go)
-- [internal/httpapi/openai/chat/handler_chat.go](file://internal/httpapi/openai/chat/handler_chat.go)
-- [internal/httpapi/openai/responses/responses_handler.go](file://internal/httpapi/openai/responses/responses_handler.go)
-- [internal/httpapi/claude/handler_messages.go](file://internal/httpapi/claude/handler_messages.go)
-- [internal/httpapi/gemini/handler_generate.go](file://internal/httpapi/gemini/handler_generate.go)
+- [internal/httpapi/openai/chat/handler.go](file://internal/httpapi/openai/chat/handler.go)
+- [internal/httpapi/openai/responses/handler.go](file://internal/httpapi/openai/responses/handler.go)
+- [internal/httpapi/claude/handler_routes.go](file://internal/httpapi/claude/handler_routes.go)
+- [internal/httpapi/gemini/handler_routes.go](file://internal/httpapi/gemini/handler_routes.go)
 - [internal/promptcompat/request_normalize.go](file://internal/promptcompat/request_normalize.go)
-- [internal/promptcompat/standard_request.go](file://internal/promptcompat/standard_request.go)
-- [internal/sse/parser.go](file://internal/sse/parser.go)
-- [internal/toolcall/toolcalls_parse.go](file://internal/toolcall/toolcalls_parse.go)
-- [internal/toolstream/tool_sieve_core.go](file://internal/toolstream/tool_sieve_core.go)
 </cite>
 
 ## 目录
+
 1. [简介](#简介)
 2. [项目结构](#项目结构)
 3. [核心组件](#核心组件)
 4. [架构总览](#架构总览)
 5. [详细组件分析](#详细组件分析)
-6. [依赖分析](#依赖分析)
-7. [性能考虑](#性能考虑)
-8. [故障排查指南](#故障排查指南)
-9. [结论](#结论)
+6. [故障排查指南](#故障排查指南)
+7. [结论](#结论)
 
 ## 简介
 
-API Compatibility System 负责把 OpenAI、Claude、Gemini 请求统一成 DeepSeek completion 可执行的上下文，并把 DeepSeek SSE 或非流式结果还原为客户端期望的响应格式。路由层还提供统一协议响应缓存，所有协议 POST 请求在进入 handler 前先尝试 5 分钟且最多 3.8GB 的内存缓存，以及 4 小时且最多 16GB 的 gzip 磁盘缓存。该系统的维护重点不是单个接口字段，而是协议语义在缓存、标准化、prompt、tool、文件、stream 和错误收尾之间是否一致。
+API 兼容系统负责接受 OpenAI、Claude、Gemini 风格请求，把消息、工具、文件引用、模型 alias、stream 参数和上下文转成 DeepSeek Web 可处理的请求，再把上游结果渲染回原协议形态。
 
 **章节来源**
-- [router.go:72-87](file://internal/server/router.go#L72-L87)
-- [cache.go:131-181](file://internal/responsecache/cache.go#L131-L181)
-- [handler_chat.go:21-154](file://internal/httpapi/openai/chat/handler_chat.go#L21-L154)
-- [responses_handler.go:51-175](file://internal/httpapi/openai/responses/responses_handler.go#L51-L175)
-- [request_normalize.go:16-156](file://internal/promptcompat/request_normalize.go#L16-L156)
+- [internal/server/router.go](file://internal/server/router.go)
+- [API.md](file://API.md)
 
 ## 项目结构
 
 ```mermaid
 graph TB
-subgraph "Surfaces"
-CACHE["Protocol Response Cache"]
-CHAT["OpenAI Chat"]
-RESP["OpenAI Responses"]
-CLAUDE["Claude Messages"]
-GEMINI["Gemini GenerateContent"]
+subgraph "OpenAI Surface"
+CHAT["chat/completions"]
+RESP["responses"]
+FILES["files"]
+EMB["embeddings"]
 end
-subgraph "Compatibility"
-STD["StandardRequest"]
-TOOL["Tool Prompt + Parser"]
-SSE["SSE Parser"]
+subgraph "Claude Surface"
+MSG["messages"]
+TOK["count_tokens"]
 end
-CACHE --> CHAT
-CACHE --> RESP
-CACHE --> CLAUDE
-CACHE --> GEMINI
-CHAT --> STD
-RESP --> STD
-CLAUDE --> CHAT
-GEMINI --> CHAT
-STD --> TOOL
-STD --> SSE
-NODE --> SSE
+subgraph "Gemini Surface"
+GEN["generateContent"]
+STREAMGEN["streamGenerateContent"]
+end
+subgraph "Shared Compatibility"
+PROMPT["promptcompat"]
+TOOL["toolcall/toolstream"]
+FORMAT["format/openai format/claude"]
+end
+CHAT --> PROMPT
+RESP --> PROMPT
+MSG --> PROMPT
+GEN --> PROMPT
+PROMPT --> TOOL
+TOOL --> FORMAT
 ```
 
 **图表来源**
-- [router.go:72-87](file://internal/server/router.go#L72-L87)
-- [cache.go:184-208](file://internal/responsecache/cache.go#L184-L208)
-- [handler_chat.go:21-154](file://internal/httpapi/openai/chat/handler_chat.go#L21-L154)
-- [responses_handler.go:51-175](file://internal/httpapi/openai/responses/responses_handler.go#L51-L175)
-- [handler_messages.go:20-133](file://internal/httpapi/claude/handler_messages.go#L20-L133)
-- [handler_generate.go:20-129](file://internal/httpapi/gemini/handler_generate.go#L20-L129)
+- [internal/server/router.go](file://internal/server/router.go)
+- [internal/promptcompat/request_normalize.go](file://internal/promptcompat/request_normalize.go)
 
 **章节来源**
-- [prompt-compatibility.md](file://docs/prompt-compatibility.md)
+- [internal/httpapi/openai/chat/handler.go](file://internal/httpapi/openai/chat/handler.go)
+- [internal/httpapi/openai/responses/handler.go](file://internal/httpapi/openai/responses/handler.go)
 
 ## 核心组件
 
-- Protocol Response Cache：覆盖 OpenAI Chat/Responses/Embeddings、Claude/Anthropic Messages/CountTokens、Gemini GenerateContent/StreamGenerateContent；缓存键按调用方和协议输入隔离，命中后直接回放原协议响应。
-- OpenAI Chat：完整执行 Chat Completions，包含 inline file、current input file、history capture、空回复重试和 auto delete。
-- OpenAI Responses：支持 `input` 宽输入、response store、Responses SSE 事件和 `GET /v1/responses/{response_id}`。
-- Claude：提供模型列表、messages、count_tokens，并通过直接标准化或 OpenAI proxy 复用核心语义。
-- Gemini：提供 generateContent/streamGenerateContent，并映射 thinkingBudget 到 OpenAI thinking 开关。
-- SSE parser：拆分 thinking/text、过滤状态 path、采集 citation link、识别 content filter。
-- Tool parser/sieve：统一 DSML/XML 工具调用提示、解析、修复和流式缓冲。
+- OpenAI Chat：主力对话接口，支持流式、工具调用、文件引用和历史捕获。
+- OpenAI Responses：兼容 Responses 输入结构、暂存 Response 和流式事件。
+- Claude Messages：兼容 Claude Code 与 Anthropic SDK 的 messages/count_tokens 路由。
+- Gemini GenerateContent：兼容 Google 风格 contents、parts、tools 和 streamGenerateContent。
+- PromptCompat：统一消息归一化、工具提示注入、历史文本拼接和当前输入文件处理。
+- Toolcall：解析 DSML、XML 和 JSON 风格工具调用，尽量修复客户端提交的常见畸形片段。
 
 **章节来源**
-- [cache.go:41-181](file://internal/responsecache/cache.go#L41-L181)
-- [cache.go:210-272](file://internal/responsecache/cache.go#L210-L272)
-- [handler_chat.go:21-320](file://internal/httpapi/openai/chat/handler_chat.go#L21-L320)
-- [responses_handler.go:21-300](file://internal/httpapi/openai/responses/responses_handler.go#L21-L300)
-- [handler_messages.go:20-133](file://internal/httpapi/claude/handler_messages.go#L20-L133)
-- [handler_generate.go:20-170](file://internal/httpapi/gemini/handler_generate.go#L20-L170)
-- [parser.go:17-469](file://internal/sse/parser.go#L17-L469)
-- [toolcalls_parse.go:1-284](file://internal/toolcall/toolcalls_parse.go#L1-L284)
+- [internal/promptcompat/standard_request.go](file://internal/promptcompat/standard_request.go)
+- [internal/toolcall/toolcalls_parse.go](file://internal/toolcall/toolcalls_parse.go)
+- [internal/toolstream/tool_sieve_core.go](file://internal/toolstream/tool_sieve_core.go)
 
 ## 架构总览
 
 ```mermaid
 sequenceDiagram
-participant Surface as API Surface
-participant Cache as Response Cache
-participant Normalize as request_normalize
-participant Payload as CompletionPayload
-participant Upstream as DeepSeek Completion
-participant Runtime as SSE/Tool Runtime
-participant Client as Client Response
-Surface->>Cache: 协议 POST 请求
-Cache-->>Client: 命中则回放缓存响应
-Cache->>Normalize: 未命中继续归一化
-Normalize->>Payload: StandardRequest
-Payload->>Upstream: prompt + ref_file_ids
-Upstream-->>Runtime: SSE chunks
-Runtime-->>Client: OpenAI / Responses / Claude / Gemini shape
+participant SDK as SDK
+participant Surface as Protocol Surface
+participant Compat as PromptCompat
+participant Auth as Auth
+participant DS as DeepSeek
+participant Render as Protocol Renderer
+SDK->>Surface: OpenAI/Claude/Gemini request
+Surface->>Compat: normalize messages/tools/files
+Compat->>Auth: resolve caller and account
+Auth-->>Surface: token/account context
+Surface->>DS: DeepSeek completion request
+DS-->>Surface: stream/result
+Surface->>Render: protocol-specific events
+Render-->>SDK: compatible response
 ```
 
 **图表来源**
-- [cache.go:131-181](file://internal/responsecache/cache.go#L131-L181)
-- [request_normalize.go:16-156](file://internal/promptcompat/request_normalize.go#L16-L156)
-- [standard_request.go:42-89](file://internal/promptcompat/standard_request.go#L42-L89)
-- [consumer.go:21-119](file://internal/sse/consumer.go#L21-L119)
+- [internal/httpapi/openai/chat/handler_chat.go](file://internal/httpapi/openai/chat/handler_chat.go)
+- [internal/httpapi/claude/stream_runtime_core.go](file://internal/httpapi/claude/stream_runtime_core.go)
+- [internal/httpapi/gemini/handler_stream_runtime.go](file://internal/httpapi/gemini/handler_stream_runtime.go)
 
 **章节来源**
-- [prompt-compatibility.md](file://docs/prompt-compatibility.md)
+- [internal/format/openai/render_stream_events.go](file://internal/format/openai/render_stream_events.go)
+- [internal/format/claude/render.go](file://internal/format/claude/render.go)
 
 ## 详细组件分析
 
-### 标准化边界
+### 路由别名
 
-`StandardRequest` 是协议边界。它保留 surface、请求模型、解析模型、响应模型、原始消息、工具、最终 prompt、工具策略、stream、thinking、search、文件引用和 passthrough 参数。任何新增协议都应先产出该结构，再进入 DeepSeek client。
+OpenAI 支持规范 `/v1/*`、根路径别名和 `/v1/v1/*` 兜底。Claude 支持 `/anthropic/v1/messages`、`/v1/messages`、`/messages`。Gemini 支持 `/v1beta/models/*` 和 `/v1/models/*`。
 
-### 缓存边界
+### 模型 alias
 
-`responsecache.Cache` 是协议响应边界。它不理解具体协议字段，而是基于调用方、HTTP 方法、协议归一路径、查询参数、影响输出的协议请求头和请求体摘要生成 key；OpenAI root alias、双 `/v1` alias 与 Claude/Anthropic alias 会映射到同一语义路径。缓存只保存 2xx 且无 `Set-Cookie` / `no-store` 的响应；内存层保留 5 分钟且最多 3.8GB，磁盘层保留 4 小时且最多 16GB 并写入 gzip 文件。请求可通过 `Cache-Control: no-cache` / `no-store` 或 `X-DeepSeek-Web-To-API-Cache-Control: bypass` 绕过缓存。Responses 缓存命中会从缓存体恢复 response 对象并回填 response store，避免 GET 查询与缓存回放脱节。
+模型解析会先接受原生 DeepSeek 模型，再查默认 alias 和 `config.json` 的 `model_aliases`。`-nothinking` 后缀会保留为禁用 thinking 的兼容变体。
 
-### 输出边界
+### 工具调用
 
-非流式路径使用 `sse.CollectStream` 聚合 DeepSeek SSE，再由格式化层生成 OpenAI/Responses/Claude/Gemini 响应。流式路径使用 `stream.ConsumeSSE` 和各 surface 的 runtime emitter 增量输出，并在 finalize 阶段处理工具调用、usage、空回复和 content filter。
-
-### Node 对齐
-
+工具调用以“尽量接受、严格输出”为目标：对常见 DSML/XML/JSON 形态做解析和窄修复，流式阶段通过 sieve 防止工具标签泄漏到普通文本。
 
 **章节来源**
-- [cache.go:184-208](file://internal/responsecache/cache.go#L184-L208)
-- [cache.go:210-272](file://internal/responsecache/cache.go#L210-L272)
-- [cache.go:281-512](file://internal/responsecache/cache.go#L281-L512)
-- [cache.go:544-572](file://internal/responsecache/cache.go#L544-L572)
-- [cache_replay.go:13-75](file://internal/httpapi/openai/responses/cache_replay.go#L13-L75)
-- [standard_request.go:1-89](file://internal/promptcompat/standard_request.go#L1-L89)
-- [consumer.go:21-119](file://internal/sse/consumer.go#L21-L119)
-- [engine.go:21-146](file://internal/stream/engine.go#L21-L146)
-
-## 依赖分析
-
-兼容系统依赖路由中间件、模型解析、账号鉴权、DeepSeek client、SSE parser、tool parser、translatorcliproxy 和格式化层。Claude/Gemini 的 translator 引入了协议转换依赖，因此改动其请求字段时必须同时验证 OpenAI 共享路径；缓存 key 相关请求头变化也必须同步验证所有协议命中隔离。
-
-**章节来源**
-- [router.go:72-87](file://internal/server/router.go#L72-L87)
-- [cache.go:196-208](file://internal/responsecache/cache.go#L196-L208)
-- [models.go:1-210](file://internal/config/models.go#L1-L210)
-- [request.go:37-139](file://internal/auth/request.go#L37-L139)
-- [handler_messages.go:20-133](file://internal/httpapi/claude/handler_messages.go#L20-L133)
-- [handler_generate.go:20-129](file://internal/httpapi/gemini/handler_generate.go#L20-L129)
-
-## 性能考虑
-
-兼容系统要避免四类开销失控：重复上游协议调用、超大请求体、流式工具块无限缓冲、Responses store 长时间保留。当前代码通过路由级响应缓存、`http.MaxBytesReader`、tool sieve flush、Responses TTL、stream idle timeout 和 request trace 限制风险；缓存层会快速跳过声明超过上限的请求体，对未知长度或 chunked 请求只做上限 +1 字节的有界读取，并把内存缓存限制在 3.8GB、磁盘缓存限制在 16GB，避免为了缓存提前吞入或长期保留过大的数据。
-
-**章节来源**
-- [cache.go:131-181](file://internal/responsecache/cache.go#L131-L181)
-- [cache.go:255-279](file://internal/responsecache/cache.go#L255-L279)
-- [handler_chat.go:35-48](file://internal/httpapi/openai/chat/handler_chat.go#L35-L48)
-- [responses_handler.go:51-66](file://internal/httpapi/openai/responses/responses_handler.go#L51-L66)
-- [response_store.go:22-76](file://internal/httpapi/openai/responses/response_store.go#L22-L76)
-- [tool_sieve_core.go:9-220](file://internal/toolstream/tool_sieve_core.go#L9-L220)
+- [internal/server/router.go](file://internal/server/router.go)
+- [internal/config/models.go](file://internal/config/models.go)
+- [internal/toolcall/toolcalls_dsml.go](file://internal/toolcall/toolcalls_dsml.go)
 
 ## 故障排查指南
 
-- 协议返回形状错误：先确认是否走了正确 surface，再看 formatter 和 translator。
-- 缓存命中/未命中异常：检查 `X-DeepSeek-Web-To-API-Cache`、请求体、模型、协议归一路径、`Anthropic-Version`、`Anthropic-Beta`、`X-DeepSeek-Web-To-API-Target-Account` 和缓存绕过请求头。
-- tool 调用丢失：检查工具 schema 是否进入 `injectToolPrompt`，再看 parser 是否识别 DSML/XML wrapper。
-- thinking 泄漏或缺失：检查模型 `-nothinking`、请求 override、stream runtime 和 `ExposeReasoning`。
+- SDK 拼出 `/v1/v1/*`：后端已有别名，优先检查客户端 baseURL 是否重复带 `/v1`。
+- Claude Code 不流式：检查请求是否命中 `/anthropic/v1/messages` 或 `/v1/messages`，以及客户端是否开启 stream。
+- 工具调用泄漏为普通文本：查看 [工具调用语义](file://docs/toolcall-semantics.md)，确认模型输出结构是否可被窄修复。
+- 缓存命中低：检查请求体中是否包含每次变化的字段，以及调用方 API Key 是否一致。
 
 **章节来源**
-- [cache.go:184-208](file://internal/responsecache/cache.go#L184-L208)
-- [cache.go:669-681](file://internal/responsecache/cache.go#L669-L681)
-- [tool_prompt.go:1-66](file://internal/promptcompat/tool_prompt.go#L1-L66)
-- [toolcalls_parse.go:1-80](file://internal/toolcall/toolcalls_parse.go#L1-L80)
-- [sse_parse_impl.js:1-636](file://internal/js/chat-stream/sse_parse_impl.js#L1-L636)
-- [parser.go:17-469](file://internal/sse/parser.go#L17-L469)
+- [docs/toolcall-semantics.md](file://docs/toolcall-semantics.md)
+- [internal/responsecache/cache.go](file://internal/responsecache/cache.go)
 
 ## 结论
 
-协议兼容系统的正确性来自共享中间语义和统一路由边界，而不是每个协议各自维护一套规则。新增字段、模型、工具策略、缓存相关请求头或流式行为时，应先确认缓存 key 与 `StandardRequest` 是否表达清楚，再同步 Go 与 Node 两套流式解析实现。
+兼容系统不是简单转发层，而是请求归一化、上下文合成、工具修复、流式渲染和上游调用的组合。保持它的文档与 `docs/prompt-compatibility.md` 同步，是后续兼容 Claude Code、Codex 和各类 SDK 的关键。
 
 **章节来源**
-- [cache.go:196-208](file://internal/responsecache/cache.go#L196-L208)
-- [standard_request.go:1-89](file://internal/promptcompat/standard_request.go#L1-L89)
-- [prompt-compatibility.md](file://docs/prompt-compatibility.md)
+- [docs/prompt-compatibility.md](file://docs/prompt-compatibility.md)

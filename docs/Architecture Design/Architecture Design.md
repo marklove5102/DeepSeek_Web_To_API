@@ -1,170 +1,173 @@
-# Architecture Design
+# 架构设计
 
 <cite>
 **本文档引用的文件**
 - [cmd/DeepSeek_Web_To_API/main.go](file://cmd/DeepSeek_Web_To_API/main.go)
 - [internal/server/router.go](file://internal/server/router.go)
-- [internal/httpapi/openai/chat/handler_chat.go](file://internal/httpapi/openai/chat/handler_chat.go)
-- [internal/httpapi/openai/responses/responses_handler.go](file://internal/httpapi/openai/responses/responses_handler.go)
-- [internal/httpapi/claude/handler_routes.go](file://internal/httpapi/claude/handler_routes.go)
-- [internal/httpapi/gemini/handler_routes.go](file://internal/httpapi/gemini/handler_routes.go)
-- [internal/promptcompat/standard_request.go](file://internal/promptcompat/standard_request.go)
-- [internal/deepseek/client/client_completion.go](file://internal/deepseek/client/client_completion.go)
+- [internal/auth/request.go](file://internal/auth/request.go)
+- [internal/account/pool_acquire.go](file://internal/account/pool_acquire.go)
+- [internal/responsecache/cache.go](file://internal/responsecache/cache.go)
+- [internal/chathistory/sqlite_store.go](file://internal/chathistory/sqlite_store.go)
 </cite>
 
 ## 目录
+
 1. [简介](#简介)
 2. [项目结构](#项目结构)
 3. [核心组件](#核心组件)
 4. [架构总览](#架构总览)
 5. [详细组件分析](#详细组件分析)
-6. [依赖分析](#依赖分析)
-7. [性能考虑](#性能考虑)
-8. [故障排查指南](#故障排查指南)
-9. [结论](#结论)
+6. [性能考虑](#性能考虑)
+7. [结论](#结论)
 
 ## 简介
 
-本文件描述 DeepSeek_Web_To_API 的运行架构。系统以 `server.NewApp` 为装配中心：加载配置，初始化账号池、鉴权、DeepSeek client、chat history store、各协议 handler 和 WebUI handler，然后将它们挂入 chi router。协议层尽量共享 OpenAI 兼容语义，避免 Claude/Gemini 与 OpenAI 的行为分叉。
+系统架构分为入口层、协议适配层、运行控制层、本地状态层和上游访问层。入口层保证请求可控，协议层负责 OpenAI/Claude/Gemini 形态转换，运行层负责账号和鉴权，本地状态层负责缓存和历史，上游层负责 DeepSeek Web 请求。
 
 **章节来源**
-- [router.go:41-105](file://internal/server/router.go#L41-L105)
-- [handler_chat.go:21-154](file://internal/httpapi/openai/chat/handler_chat.go#L21-L154)
-- [responses_handler.go:51-175](file://internal/httpapi/openai/responses/responses_handler.go#L51-L175)
+- [cmd/DeepSeek_Web_To_API/main.go](file://cmd/DeepSeek_Web_To_API/main.go)
+- [internal/server/router.go](file://internal/server/router.go)
 
 ## 项目结构
 
 ```mermaid
 graph TB
-subgraph "Entrypoint Layer"
-CMD["cmd/DeepSeek_Web_To_API/main.go"]
+subgraph "入口层"
+MAIN["main.go<br/>HTTP Server"]
+ROUTER["router.go<br/>chi Router"]
+MIDDLEWARE["Middleware<br/>CORS Security UTF8 Cache"]
 end
-subgraph "Application Layer"
-SERVER["internal/server/router.go"]
-ADMIN["internal/httpapi/admin"]
-OPENAI["internal/httpapi/openai"]
-CLAUDE["internal/httpapi/claude"]
-GEMINI["internal/httpapi/gemini"]
+subgraph "协议层"
+OA["OpenAI Handlers"]
+CA["Claude Handlers"]
+GA["Gemini Handlers"]
+ADMIN["Admin Handlers"]
 end
-subgraph "Core Layer"
-AUTH["internal/auth"]
-ACCOUNT["internal/account"]
-COMPAT["internal/promptcompat"]
-DEEPSEEK["internal/deepseek"]
+subgraph "运行层"
+AUTH["Auth Resolver"]
+POOL["Account Pool"]
+CONFIG["Config Store"]
 end
-CMD --> SERVER
-APP --> SERVER
-API --> APP
-SERVER --> ADMIN
-SERVER --> OPENAI
-SERVER --> CLAUDE
-SERVER --> GEMINI
-SERVER --> AUTH
-AUTH --> ACCOUNT
-OPENAI --> COMPAT
-COMPAT --> DEEPSEEK
+subgraph "状态层"
+HISTORY["SQLite History"]
+CACHE["Response Cache"]
+end
+subgraph "上游层"
+DS["DeepSeek Client"]
+end
+MAIN --> ROUTER
+ROUTER --> MIDDLEWARE
+MIDDLEWARE --> OA
+MIDDLEWARE --> CA
+MIDDLEWARE --> GA
+MIDDLEWARE --> ADMIN
+OA --> AUTH
+CA --> AUTH
+GA --> AUTH
+AUTH --> POOL
+AUTH --> CONFIG
+OA --> HISTORY
+CA --> HISTORY
+OA --> DS
+CA --> DS
+GA --> DS
+MIDDLEWARE --> CACHE
 ```
 
 **图表来源**
-- [main.go:19-89](file://cmd/DeepSeek_Web_To_API/main.go#L19-L89)
-- [router.go:41-105](file://internal/server/router.go#L41-L105)
+- [internal/server/router.go](file://internal/server/router.go)
+- [internal/httpapi/admin/handler.go](file://internal/httpapi/admin/handler.go)
 
 **章节来源**
-- [router.go:41-105](file://internal/server/router.go#L41-L105)
+- [internal/server/router.go](file://internal/server/router.go)
 
 ## 核心组件
 
-- `server.App`：保存 `Store`、`Pool`、`Resolver`、`DS` 和 `Router`，是运行时依赖容器。
-- `auth.Resolver`：解析 bearer、`x-api-key`、`x-goog-api-key`，区分托管 API key 与直传 DeepSeek token。
-- `account.Pool`：管理托管账号并发、等待队列、目标账号选择和 session affinity。
-- `promptcompat.StandardRequest`：协议兼容层的统一中间结构。
-- `deepseek.Client`：封装 DeepSeek 登录、建会话、PoW、completion、上传和会话删除。
-- `stream.ConsumeSSE`：统一 SSE 消费循环，处理 keepalive、idle timeout、上下文取消和终结回调。
+- `App`：持有配置、账号池、鉴权解析器、DeepSeek 客户端和 HTTP Router。
+- `Auth Resolver`：解析调用方身份，决定托管账号或直通 token。
+- `Account Pool`：控制每账号并发、全局并发、等待队列和会话亲和。
+- `Response Cache`：作为中间件统一服务多协议缓存。
+- `SQLite History`：记录请求摘要和完整详情。
+- `Admin Handler`：把管理接口拆分为 auth、accounts、config、settings、proxies、history、metrics 等子模块。
 
 **章节来源**
-- [router.go:22-39](file://internal/server/router.go#L22-L39)
-- [request.go:37-139](file://internal/auth/request.go#L37-L139)
-- [pool_core.go:17-73](file://internal/account/pool_core.go#L17-L73)
-- [standard_request.go:1-89](file://internal/promptcompat/standard_request.go#L1-L89)
-- [client_completion.go:15-89](file://internal/deepseek/client/client_completion.go#L15-L89)
-- [engine.go:21-146](file://internal/stream/engine.go#L21-L146)
+- [internal/server/router.go](file://internal/server/router.go)
+- [internal/auth/request.go](file://internal/auth/request.go)
+- [internal/account/pool_core.go](file://internal/account/pool_core.go)
 
 ## 架构总览
 
 ```mermaid
 sequenceDiagram
-participant Main as cmd entry
-participant Server as server.NewApp
-participant Router as chi Router
-participant Handler as Protocol Handler
-participant Compat as promptcompat
+participant C as Client
+participant S as Server Router
+participant Cache as Response Cache
+participant Auth as Auth Resolver
+participant Pool as Account Pool
+participant H as Protocol Handler
 participant DS as DeepSeek Client
-Main->>Server: 初始化应用
-Server->>Router: 挂载协议与 Admin 路由
-Router->>Handler: 分发请求
-Handler->>Compat: 标准化请求
-Handler->>DS: 会话、PoW、completion
-DS-->>Handler: SSE 或错误
-Handler-->>Router: 协议兼容响应
+participant Hist as SQLite History
+C->>S: HTTP request
+S->>S: request middleware
+S->>Cache: cache lookup
+alt cache hit
+Cache-->>C: replay response
+else cache miss
+Cache->>H: forward request
+H->>Auth: determine caller
+Auth->>Pool: acquire account if managed
+H->>Hist: start history
+H->>DS: upstream call
+DS-->>H: upstream stream/result
+H->>Hist: finalize history
+H-->>Cache: captured response
+Cache-->>C: response
+end
 ```
 
 **图表来源**
-- [main.go:19-89](file://cmd/DeepSeek_Web_To_API/main.go#L19-L89)
-- [router.go:41-105](file://internal/server/router.go#L41-L105)
-- [handler_chat.go:21-154](file://internal/httpapi/openai/chat/handler_chat.go#L21-L154)
+- [internal/server/router.go](file://internal/server/router.go)
+- [internal/responsecache/cache.go](file://internal/responsecache/cache.go)
+- [internal/httpapi/historycapture/capture.go](file://internal/httpapi/historycapture/capture.go)
 
 **章节来源**
-- [router.go:41-105](file://internal/server/router.go#L41-L105)
-- [client_auth.go:53-160](file://internal/deepseek/client/client_auth.go#L53-L160)
+- [internal/httpapi/openai/chat/handler_chat.go](file://internal/httpapi/openai/chat/handler_chat.go)
+- [internal/httpapi/claude/handler_messages.go](file://internal/httpapi/claude/handler_messages.go)
 
 ## 详细组件分析
 
-### 路由树
+### 服务启动
 
-顶层路由包含 `/healthz`、`/readyz`、`/v1/models`、`/v1/chat/completions`、`/v1/responses`、`/v1/files`、`/v1/embeddings`、Claude、Gemini、`/admin` 和 WebUI fallback。中间件包括 request ID、真实 IP、日志、panic recover、CORS、安全响应头和可选 timeout。
+启动过程依次执行：环境变量别名、`.env` 读取、配置加载、账号池和上游客户端初始化、PoW 预加载、SQLite 历史记录初始化、响应缓存初始化、路由装配、WebUI 构建检查、管理端安全校验和 HTTP Server 启动。
 
-### 协议共享
+### 中间件顺序
 
-OpenAI Chat 与 Responses 是最完整的执行路径。Claude 与 Gemini 优先翻译到 OpenAI 请求并复用 `ChatCompletions`，这样模型别名、thinking、工具调用、空回复重试和流式语义能够保持一致。
+中间件顺序是请求可观测性和安全边界的一部分：RequestID、RealIP、过滤日志、Recoverer、CORS、安全头、JSON UTF-8 校验、可选 timeout、响应缓存。
 
+### 并发模型
 
-
-**章节来源**
-- [router.go:77-111](file://internal/server/router.go#L77-L111)
-- [handler_messages.go:20-133](file://internal/httpapi/claude/handler_messages.go#L20-L133)
-- [handler_generate.go:20-129](file://internal/httpapi/gemini/handler_generate.go#L20-L129)
-- [index.js:19-57](file://internal/js/chat-stream/index.js#L19-L57)
-
-## 依赖分析
-
+账号池按账号标识维护 in-flight 计数，默认每账号最多 2 个并发。没有指定账号时按轮询队列选择可用账号；指定账号时如果忙碌则等待或失败。会话亲和用于让同一长对话倾向落到同一账号。
 
 **章节来源**
-- [go.mod:1-24](file://go.mod#L1-L24)
-- [webui/package.json:1-27](file://webui/package.json#L1-L27)
-- [Dockerfile:1-57](file://Dockerfile#L1-L57)
+- [cmd/DeepSeek_Web_To_API/main.go](file://cmd/DeepSeek_Web_To_API/main.go)
+- [internal/server/router.go](file://internal/server/router.go)
+- [internal/account/pool_acquire.go](file://internal/account/pool_acquire.go)
 
 ## 性能考虑
 
-路由层没有引入复杂状态，主要性能压力来自上游流式请求持续时间、账号池等待、tool sieve 缓冲、history 持久化和 WebUI 静态文件托管。当前架构将长耗时上游调用集中在 handler 内，并通过 account release、defer、stream keepalive 和 history progress 节流降低资源占用。
+- 响应缓存减少重复请求和上游压力，内存层优先，磁盘层持久化短期结果。
+- SQLite 使用 WAL 和单连接，适合本地嵌入式写入，避免并发写放大。
+- WebUI 构建只在静态文件缺失且允许自动构建时触发。
+- 上游流式请求可能持续较久，反代和平台超时应高于业务请求时间。
 
 **章节来源**
-- [handler_chat.go:75-154](file://internal/httpapi/openai/chat/handler_chat.go#L75-L154)
-- [chat_history.go:118-179](file://internal/httpapi/openai/chat/chat_history.go#L118-L179)
-- [engine.go:37-146](file://internal/stream/engine.go#L37-L146)
-
-## 故障排查指南
-
-- Claude/Gemini 行为和 OpenAI 不一致：先确认是否走了 `proxyViaOpenAI`，再看 translator 输入和 thinking 策略。
-
-**章节来源**
-- [router.go:91-111](file://internal/server/router.go#L91-L111)
-- [handler_messages.go:20-133](file://internal/httpapi/claude/handler_messages.go#L20-L133)
-- [handler_generate.go:20-129](file://internal/httpapi/gemini/handler_generate.go#L20-L129)
-- [index.js:19-57](file://internal/js/chat-stream/index.js#L19-L57)
+- [internal/responsecache/cache.go](file://internal/responsecache/cache.go)
+- [internal/chathistory/sqlite_store.go](file://internal/chathistory/sqlite_store.go)
+- [internal/webui/build.go](file://internal/webui/build.go)
 
 ## 结论
 
+当前架构重点是把多协议兼容入口收敛到同一套运行时能力：账号池、缓存、历史、配置和管理台共享后端状态，减少协议之间的重复实现和配置漂移。
 
 **章节来源**
-- [router.go:41-105](file://internal/server/router.go#L41-L105)
-- [prompt-compatibility.md](file://docs/prompt-compatibility.md)
+- [internal/server/router.go](file://internal/server/router.go)

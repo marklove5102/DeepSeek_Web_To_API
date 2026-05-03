@@ -1,172 +1,181 @@
-# Project Overview
+# 项目总览
 
 <cite>
 **本文档引用的文件**
-- [README.MD](file://README.MD)
 - [go.mod](file://go.mod)
-- [config.example.json](file://config.example.json)
 - [cmd/DeepSeek_Web_To_API/main.go](file://cmd/DeepSeek_Web_To_API/main.go)
 - [internal/server/router.go](file://internal/server/router.go)
 - [webui/package.json](file://webui/package.json)
-- [Dockerfile](file://Dockerfile)
-- [docker-compose.yml](file://docker-compose.yml)
+- [config.example.json](file://config.example.json)
 </cite>
 
 ## 目录
+
 1. [简介](#简介)
 2. [项目结构](#项目结构)
 3. [核心组件](#核心组件)
 4. [架构总览](#架构总览)
 5. [详细组件分析](#详细组件分析)
 6. [依赖分析](#依赖分析)
-7. [性能考虑](#性能考虑)
-8. [故障排查指南](#故障排查指南)
-9. [结论](#结论)
+7. [结论](#结论)
 
 ## 简介
 
-DeepSeek_Web_To_API 是 DeepSeek Web 对话的多协议兼容网关。它面向 OpenAI、Claude、Gemini 客户端提供熟悉的 API 形状，内部用 DeepSeek 网页接口完成会话、PoW、completion、文件上传、continue 和会话删除等操作。项目同时提供 React Admin WebUI，便于管理 API key、账号池、代理、设置、历史记录和运行指标。
+DeepSeek_Web_To_API 是一个单进程自托管网关。它把 DeepSeek Web 能力转成多家 SDK 可识别的协议接口，同时内置管理台、账号池、响应缓存、历史记录和测试工具。
+
+项目当前主要技术栈：
+
+- 后端：Go 1.26，`chi` HTTP 路由。
+- 前端：React 18、Vite、Tailwind、lucide-react。
+- 本地存储：SQLite、文件系统 gzip 缓存。
+- 部署：二进制、Docker Compose、GHCR 镜像、GitHub Release 产物。
 
 **章节来源**
-- [go.mod:1-24](file://go.mod#L1-L24)
-- [router.go:91-105](file://internal/server/router.go#L91-L105)
-- [config.example.json:1-76](file://config.example.json#L1-L76)
+- [go.mod](file://go.mod)
+- [webui/package.json](file://webui/package.json)
 
 ## 项目结构
 
 ```mermaid
 graph TB
-subgraph "Backend"
-CMD["cmd/DeepSeek_Web_To_API<br/>服务入口"]
-INTERNAL["internal<br/>业务实现"]
-POW["pow<br/>PoW 实现"]
+subgraph "Root"
+MAIN["cmd/DeepSeek_Web_To_API<br/>入口命令"]
+CONFIG["config.example.json<br/>配置模板"]
+API["API.md<br/>接口文档"]
+README["README.MD<br/>使用入口"]
 end
-subgraph "Frontend"
-WEBUI["webui/src<br/>React 管理台"]
-STATIC["static/admin<br/>构建产物"]
+subgraph "Backend Internal"
+SERVER["internal/server<br/>路由装配"]
+HTTPAPI["internal/httpapi<br/>协议和管理接口"]
+DEEPSEEK["internal/deepseek<br/>上游请求"]
+PROMPT["internal/promptcompat<br/>请求归一化"]
+TOOL["internal/toolcall & internal/toolstream<br/>工具调用"]
 end
-subgraph "Delivery"
-DOCKER["Dockerfile<br/>容器构建"]
-TESTS["tests + scripts<br/>质量门禁"]
+subgraph "Runtime State"
+ACCOUNT["internal/account<br/>账号池"]
+AUTH["internal/auth<br/>鉴权"]
+HISTORY["internal/chathistory<br/>SQLite 历史"]
+CACHE["internal/responsecache<br/>响应缓存"]
 end
-CMD --> INTERNAL
-WEBUI --> STATIC
-DOCKER --> STATIC
-TESTS --> INTERNAL
+subgraph "WebUI"
+WEBUISRC["webui/src<br/>React 源码"]
+STATIC["static/admin<br/>构建输出"]
+end
+MAIN --> SERVER
+SERVER --> HTTPAPI
+HTTPAPI --> DEEPSEEK
+HTTPAPI --> PROMPT
+HTTPAPI --> TOOL
+HTTPAPI --> ACCOUNT
+HTTPAPI --> AUTH
+HTTPAPI --> HISTORY
+SERVER --> CACHE
+WEBUISRC --> STATIC
 ```
 
 **图表来源**
-- [main.go:19-89](file://cmd/DeepSeek_Web_To_API/main.go#L19-L89)
-- [webui/package.json:1-27](file://webui/package.json#L1-L27)
-- [Dockerfile:1-57](file://Dockerfile#L1-L57)
+- [cmd/DeepSeek_Web_To_API/main.go](file://cmd/DeepSeek_Web_To_API/main.go)
+- [internal/server/router.go](file://internal/server/router.go)
+- [webui/package.json](file://webui/package.json)
 
 **章节来源**
-- [README.MD](file://README.MD)
-- [go.mod:1-24](file://go.mod#L1-L24)
+- [internal/server/router.go](file://internal/server/router.go)
 
 ## 核心组件
 
-- 服务入口：`cmd/DeepSeek_Web_To_API/main.go` 负责本地/容器运行。
-- HTTP surface：`internal/server/router.go` 挂载健康检查、OpenAI、Claude、Gemini、Admin 与 WebUI。
-- 兼容内核：`internal/promptcompat` 把不同协议输入变成 DeepSeek prompt 与 payload。
-- 上游访问：`internal/deepseek` 处理登录、PoW、completion、文件和会话生命周期。
-- 管理台：`webui/src` 提供账号、代理、API 测试、历史、设置和总览页面。
-- 交付：Docker、docker-compose、Zeabur 和测试脚本覆盖不同部署方式。
+- 协议入口：OpenAI、Claude、Gemini 三类客户端都由 `internal/server/router.go` 挂载到同一服务。
+- 兼容核心：`internal/promptcompat` 负责把 API 消息和工具调用上下文转成 DeepSeek Web 可理解的纯文本语境。
+- 上游客户端：`internal/deepseek/client` 负责登录、会话、文件、补全和 PoW。
+- 管理台：`webui` 提供人机操作面，`internal/httpapi/admin` 提供受保护的管理接口。
+- 状态层：SQLite 保存历史，gzip 磁盘缓存保存协议响应，配置文件保存长期业务配置。
 
 **章节来源**
-- [router.go:41-105](file://internal/server/router.go#L41-L105)
-- [request_normalize.go:16-156](file://internal/promptcompat/request_normalize.go#L16-L156)
-- [client_auth.go:53-160](file://internal/deepseek/client/client_auth.go#L53-L160)
-- [DashboardShell.jsx:50-181](file://webui/src/layout/DashboardShell.jsx#L50-L181)
+- [internal/httpapi/openai/chat/handler.go](file://internal/httpapi/openai/chat/handler.go)
+- [internal/httpapi/claude/handler_routes.go](file://internal/httpapi/claude/handler_routes.go)
+- [internal/httpapi/gemini/handler_routes.go](file://internal/httpapi/gemini/handler_routes.go)
+- [internal/httpapi/admin/handler.go](file://internal/httpapi/admin/handler.go)
 
 ## 架构总览
 
 ```mermaid
 graph TB
-subgraph "Users"
-SDK["SDK / CLI 客户端"]
-ADMIN["浏览器 Admin UI"]
+subgraph "Control Plane"
+ADMINWEB["/admin WebUI"]
+ADMINAPI["Admin API"]
+CONFIGSTORE["config.Store"]
 end
-subgraph "DeepSeek_Web_To_API"
-API["兼容 API"]
-CONFIG["配置与鉴权"]
-POOL["账号池"]
-COMPAT["Prompt 兼容"]
+subgraph "Data Plane"
+OPENAI["OpenAI API"]
+CLAUDE["Claude API"]
+GEMINI["Gemini API"]
+AUTH["Auth Resolver"]
+POOL["Account Pool"]
+UPSTREAM["DeepSeek Client"]
 end
-subgraph "DeepSeek"
-WEB["DeepSeek Web API"]
+subgraph "Local State"
+HISTORY["SQLite History"]
+CACHE["Response Cache"]
+RAW["Raw Samples"]
 end
-SDK --> API
-ADMIN --> API
-API --> CONFIG
-CONFIG --> POOL
-API --> COMPAT
-COMPAT --> WEB
-POOL --> WEB
+ADMINWEB --> ADMINAPI
+ADMINAPI --> CONFIGSTORE
+OPENAI --> AUTH
+CLAUDE --> AUTH
+GEMINI --> AUTH
+AUTH --> POOL
+OPENAI --> UPSTREAM
+CLAUDE --> UPSTREAM
+GEMINI --> UPSTREAM
+OPENAI --> HISTORY
+CLAUDE --> HISTORY
+OPENAI --> CACHE
+CLAUDE --> CACHE
+GEMINI --> CACHE
+ADMINAPI --> RAW
 ```
 
 **图表来源**
-- [router.go:91-105](file://internal/server/router.go#L91-L105)
-- [request.go:37-139](file://internal/auth/request.go#L37-L139)
-- [pool_core.go:17-73](file://internal/account/pool_core.go#L17-L73)
-- [standard_request.go:42-89](file://internal/promptcompat/standard_request.go#L42-L89)
+- [internal/server/router.go](file://internal/server/router.go)
+- [internal/httpapi/admin/handler.go](file://internal/httpapi/admin/handler.go)
 
 **章节来源**
-- [Architecture Design.md](file://docs/Architecture%20Design/Architecture%20Design.md)
+- [internal/config/store.go](file://internal/config/store.go)
+- [internal/account/pool_core.go](file://internal/account/pool_core.go)
 
 ## 详细组件分析
 
-### 对外能力
+### 请求处理面
 
-OpenAI surface 覆盖 models、chat completions、responses、files 和 embeddings。Claude surface 覆盖 models、messages、count_tokens。Gemini surface 覆盖 generateContent 与 streamGenerateContent。Admin surface 覆盖认证、配置、账号、代理、历史、指标、版本和开发采集。
+所有 HTTP 请求进入同一 `chi` 路由树，经过 RequestID、RealIP、访问日志、panic recovery、CORS、安全响应头、JSON UTF-8 校验和响应缓存中间件后再到具体协议处理器。
 
-### 配置方式
+### 账号与调用方
 
-项目支持文件配置和 `DEEPSEEK_WEB_TO_API_CONFIG_JSON` 环境变量。示例配置包含 API key、托管账号、模型别名、兼容选项、Responses store、current input file、thinking injection、embeddings、Admin JWT、运行时并发和自动删除策略。
+`auth.Resolver` 根据调用方 token 判断托管账号模式或直通 token 模式。托管账号模式进入 `account.Pool`，支持指定账号、会话亲和、并发槽位和队列等待。
 
-### 部署方式
+### 管理台
 
-Dockerfile 先构建 WebUI，再构建 Go 二进制，最终运行镜像只保留必要文件。docker-compose 使用 `/data/config.json` 持久化配置。
+管理台通过 `/admin` 静态托管。开发模式下前端保留 Landing Page，生产模式下直接进入管理台登录或仪表盘。
 
 **章节来源**
-- [router.go:91-105](file://internal/server/router.go#L91-L105)
-- [config.example.json:1-76](file://config.example.json#L1-L76)
-- [Dockerfile:1-57](file://Dockerfile#L1-L57)
-- [docker-compose.yml:1-20](file://docker-compose.yml#L1-L20)
+- [internal/server/router.go](file://internal/server/router.go)
+- [internal/auth/request.go](file://internal/auth/request.go)
+- [webui/src/app/AppRoutes.jsx](file://webui/src/app/AppRoutes.jsx)
 
 ## 依赖分析
 
-后端依赖 Go 1.26、chi、utls、CLIProxyAPI、uuid、x/net/proxy 等库。前端依赖 React、Vite、React Router、lucide-react 和 Tailwind 工具链。运行时依赖 DeepSeek Web API 可达、Admin 凭证、JWT secret、配置文件或环境变量。
+- `modernc.org/sqlite`：纯 Go SQLite，避免 CGO 运行依赖。
+- `github.com/go-chi/chi/v5`：轻量路由和中间件。
+- `github.com/router-for-me/CLIProxyAPI/v6`：代理相关能力。
+- `github.com/hupe1980/go-tiktoken`：token 估算。
+- React/Vite：管理台构建和本地开发。
 
 **章节来源**
-- [go.mod:1-24](file://go.mod#L1-L24)
-- [webui/package.json:1-27](file://webui/package.json#L1-L27)
-- [config.example.json:1-76](file://config.example.json#L1-L76)
-
-## 性能考虑
-
-项目的性能主要由账号池并发、上游 DeepSeek 响应、SSE 流持续时间、文件上传大小和 WebUI 构建/静态托管决定。默认单账号并发为 2，可通过配置或环境变量调整；流式路径支持长 idle timeout 和 keepalive。
-
-**章节来源**
-- [pool_core.go:17-73](file://internal/account/pool_core.go#L17-L73)
-- [engine.go:37-146](file://internal/stream/engine.go#L37-L146)
-
-## 故障排查指南
-
-- 服务启动失败：检查配置 JSON 是否可解析、`admin.key` / `admin.password_hash` 和 `admin.jwt_secret` 是否存在。
-- API 认证失败：确认客户端 token 是配置中的 API key，或直接传入 DeepSeek token。
-- 没有可用账号：检查托管账号列表、token 刷新、并发限制和代理配置。
-- WebUI 访问异常：确认 `static/admin` 已构建，或本地启动时允许自动构建。
-
-**章节来源**
-- [main.go:19-45](file://cmd/DeepSeek_Web_To_API/main.go#L19-L45)
-- [request.go:37-139](file://internal/auth/request.go#L37-L139)
-- [build.go:20-64](file://internal/webui/build.go#L20-L64)
+- [go.mod](file://go.mod)
+- [webui/package.json](file://webui/package.json)
 
 ## 结论
 
-DeepSeek_Web_To_API 的项目边界清晰：外层接入多协议客户端，中层做统一兼容和运行治理，内层调用 DeepSeek Web API。理解这一点后，文档阅读和代码修改都应围绕“入口、兼容、执行、运维、管理台、测试”六个方向展开。
+当前项目是一个明确的网关型服务。文档、配置、部署和测试都应围绕“单 Go 服务 + 管理台 + 本地运行态数据”展开。
 
 **章节来源**
-- [docs/README.md](file://docs/README.md)
-- [docs/Architecture Design/Architecture Design.md](file://docs/Architecture%20Design/Architecture%20Design.md)
+- [README.MD](file://README.MD)
