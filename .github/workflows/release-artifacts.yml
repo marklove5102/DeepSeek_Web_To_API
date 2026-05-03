@@ -84,9 +84,9 @@ jobs:
 
       - name: Release Blocking Gates
         run: |
-          ./scripts/lint.sh
-          ./tests/scripts/check-refactor-line-gate.sh
-          ./tests/scripts/run-unit-all.sh
+          bash ./scripts/lint.sh
+          bash ./tests/scripts/check-refactor-line-gate.sh
+          bash ./tests/scripts/run-unit-all.sh
 
       - name: Build WebUI
         run: |
@@ -98,7 +98,7 @@ jobs:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
           BUILD_VERSION: ${{ steps.release.outputs.version }}
           RELEASE_BUILD_JOBS: "1"
-        run: ./scripts/build-release-archives.sh
+        run: bash ./scripts/build-release-archives.sh
 
       - name: Prepare Docker release inputs
         env:

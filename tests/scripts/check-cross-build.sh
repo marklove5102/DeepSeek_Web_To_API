@@ -8,9 +8,25 @@ source "${ROOT_DIR}/scripts/release-targets.sh"
 
 OUT_DIR="${ROOT_DIR}/.tmp/cross-build"
 
+github_annotation_escape() {
+  tr '\n' ' ' | sed -e 's/%/%25/g' -e 's/\r/%0D/g'
+}
+
+emit_build_failure() {
+  local label="$1" log_file="$2"
+  local message
+
+  message="$(tail -n 30 "$log_file" | github_annotation_escape)"
+  if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+    printf '::error file=tests/scripts/check-cross-build.sh,title=Cross-build failed (%s)::%s\n' "$label" "$message" >&2
+  fi
+
+  cat "$log_file" >&2
+}
+
 build_one() {
   local goos="$1" goarch="$2" goarm="$3" label="$4"
-  local out
+  local out log_file
   out="${OUT_DIR}/${label}/deepseek-web-to-api"
   if [[ "$goos" == "windows" ]]; then
     out="${out}.exe"
@@ -18,12 +34,19 @@ build_one() {
 
   echo "[cross-build] ${label}"
   mkdir -p "$(dirname "$out")"
+  log_file="${OUT_DIR}/${label}/go-build.log"
   if [[ "$goarm" == "-" ]]; then
-    CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-      go build -buildvcs=false -trimpath -o "$out" ./cmd/DeepSeek_Web_To_API
+    if ! CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+      go build -buildvcs=false -trimpath -o "$out" ./cmd/DeepSeek_Web_To_API >"$log_file" 2>&1; then
+      emit_build_failure "$label" "$log_file"
+      return 1
+    fi
   else
-    CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" GOARM="$goarm" \
-      go build -buildvcs=false -trimpath -o "$out" ./cmd/DeepSeek_Web_To_API
+    if ! CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" GOARM="$goarm" \
+      go build -buildvcs=false -trimpath -o "$out" ./cmd/DeepSeek_Web_To_API >"$log_file" 2>&1; then
+      emit_build_failure "$label" "$log_file"
+      return 1
+    fi
   fi
 }
 

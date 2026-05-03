@@ -42,10 +42,10 @@ jobs:
           verify: true
 
       - name: Go Format and Lint Gates
-        run: ./scripts/lint.sh
+        run: bash ./scripts/lint.sh
 
       - name: Refactor Line Gate
-        run: ./tests/scripts/check-refactor-line-gate.sh
+        run: bash ./tests/scripts/check-refactor-line-gate.sh
 
   go-unit:
     name: Go Unit (${{ matrix.os }})
@@ -70,7 +70,7 @@ jobs:
           cache-dependency-path: go.sum
 
       - name: Go Unit Gate
-        run: ./tests/scripts/run-unit-go.sh
+        run: bash ./tests/scripts/run-unit-go.sh
 
   unit-all:
     name: Unit Gates (Go + Node)
@@ -93,7 +93,7 @@ jobs:
           cache-dependency-path: webui/package-lock.json
 
       - name: Unit Gates (Go + Node)
-        run: ./tests/scripts/run-unit-all.sh
+        run: bash ./tests/scripts/run-unit-all.sh
 
   webui-build:
     name: WebUI Build
@@ -131,4 +131,4 @@ jobs:
       - name: Cross-Build Release Targets
         env:
           CROSS_BUILD_JOBS: "1"
-        run: ./tests/scripts/check-cross-build.sh
+        run: bash ./tests/scripts/check-cross-build.sh
