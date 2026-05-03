@@ -37,12 +37,12 @@ static/admin/
 internal/webui/assets/admin/
 
 # Go compiled binaries
-ds2api
-ds2api-tests
-deepseek-web-to-api
-deepseek-web-to-api-tests
-DeepSeek_Web_To_API
-DeepSeek_Web_To_API-tests
+/ds2api
+/ds2api-tests
+/deepseek-web-to-api
+/deepseek-web-to-api-tests
+/DeepSeek_Web_To_API
+/DeepSeek_Web_To_API-tests
 *.exe
 dist/
 
