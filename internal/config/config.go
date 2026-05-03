@@ -1,0 +1,223 @@
+package config
+
+import (
+	// #nosec G505 -- SHA-1 is only used for legacy-compatible, non-secret proxy IDs.
+	"crypto/sha1"
+	"encoding/hex"
+	"fmt"
+	"strings"
+)
+
+type Config struct {
+	Keys              []string                `json:"keys,omitempty"`
+	APIKeys           []APIKey                `json:"api_keys,omitempty"`
+	Accounts          []Account               `json:"accounts,omitempty"`
+	Proxies           []Proxy                 `json:"proxies,omitempty"`
+	ModelAliases      map[string]string       `json:"model_aliases,omitempty"`
+	Admin             AdminConfig             `json:"admin,omitempty"`
+	Server            ServerConfig            `json:"server,omitempty"`
+	Storage           StorageConfig           `json:"storage,omitempty"`
+	Cache             CacheConfig             `json:"cache,omitempty"`
+	Runtime           RuntimeConfig           `json:"runtime,omitempty"`
+	Compat            CompatConfig            `json:"compat,omitempty"`
+	Responses         ResponsesConfig         `json:"responses,omitempty"`
+	Embeddings        EmbeddingsConfig        `json:"embeddings,omitempty"`
+	AutoDelete        AutoDeleteConfig        `json:"auto_delete"`
+	HistorySplit      HistorySplitConfig      `json:"history_split"`
+	CurrentInputFile  CurrentInputFileConfig  `json:"current_input_file,omitempty"`
+	ThinkingInjection ThinkingInjectionConfig `json:"thinking_injection,omitempty"`
+	AdditionalFields  map[string]any          `json:"-"`
+}
+
+type Account struct {
+	Name     string `json:"name,omitempty"`
+	Remark   string `json:"remark,omitempty"`
+	Email    string `json:"email,omitempty"`
+	Mobile   string `json:"mobile,omitempty"`
+	Password string `json:"password,omitempty"`
+	Token    string `json:"token,omitempty"`
+	ProxyID  string `json:"proxy_id,omitempty"`
+}
+
+type APIKey struct {
+	Key    string `json:"key"`
+	Name   string `json:"name,omitempty"`
+	Remark string `json:"remark,omitempty"`
+}
+
+type Proxy struct {
+	ID       string `json:"id,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Type     string `json:"type,omitempty"`
+	Host     string `json:"host,omitempty"`
+	Port     int    `json:"port,omitempty"`
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
+}
+
+func NormalizeProxy(p Proxy) Proxy {
+	p.ID = strings.TrimSpace(p.ID)
+	p.Name = strings.TrimSpace(p.Name)
+	p.Type = strings.ToLower(strings.TrimSpace(p.Type))
+	p.Host = strings.TrimSpace(p.Host)
+	p.Username = strings.TrimSpace(p.Username)
+	p.Password = strings.TrimSpace(p.Password)
+	if p.ID == "" {
+		p.ID = StableProxyID(p)
+	}
+	if p.Name == "" && p.Host != "" && p.Port > 0 {
+		p.Name = fmt.Sprintf("%s:%d", p.Host, p.Port)
+	}
+	return p
+}
+
+func StableProxyID(p Proxy) string {
+	// #nosec G401 -- preserve existing proxy ID compatibility; this is not a security boundary.
+	sum := sha1.Sum([]byte(strings.ToLower(strings.TrimSpace(p.Type)) + "|" + strings.ToLower(strings.TrimSpace(p.Host)) + "|" + fmt.Sprintf("%d", p.Port) + "|" + strings.TrimSpace(p.Username)))
+	return "proxy_" + hex.EncodeToString(sum[:6])
+}
+
+func (c *Config) ClearAccountTokens() {
+	if c == nil {
+		return
+	}
+	for i := range c.Accounts {
+		c.Accounts[i].Token = ""
+	}
+}
+
+func (c *Config) NormalizeCredentials() {
+	if c == nil {
+		return
+	}
+	normalizedAPIKeys := normalizeAPIKeys(c.APIKeys)
+	if len(normalizedAPIKeys) > 0 {
+		c.APIKeys = normalizedAPIKeys
+		c.Keys = apiKeysToStrings(c.APIKeys)
+	} else {
+		c.Keys = normalizeKeys(c.Keys)
+		c.APIKeys = apiKeysFromStrings(c.Keys, nil)
+	}
+
+	for i := range c.Accounts {
+		c.Accounts[i].Name = strings.TrimSpace(c.Accounts[i].Name)
+		c.Accounts[i].Remark = strings.TrimSpace(c.Accounts[i].Remark)
+	}
+
+	c.normalizeModelAliases()
+}
+
+// DropInvalidAccounts removes accounts that cannot be addressed by admin APIs
+// (no email and no normalizable mobile). This prevents legacy token-only
+// records from becoming orphaned empty entries after token stripping.
+func (c *Config) DropInvalidAccounts() {
+	if c == nil || len(c.Accounts) == 0 {
+		return
+	}
+	kept := make([]Account, 0, len(c.Accounts))
+	for _, acc := range c.Accounts {
+		if acc.Identifier() == "" {
+			continue
+		}
+		kept = append(kept, acc)
+	}
+	c.Accounts = kept
+}
+
+func (c *Config) normalizeModelAliases() {
+	if c == nil {
+		return
+	}
+
+	aliases := map[string]string{}
+	for k, v := range c.ModelAliases {
+		key := strings.TrimSpace(lower(k))
+		val := strings.TrimSpace(lower(v))
+		if key == "" || val == "" {
+			continue
+		}
+		aliases[key] = val
+	}
+	if len(aliases) == 0 {
+		c.ModelAliases = nil
+	} else {
+		c.ModelAliases = aliases
+	}
+}
+
+type CompatConfig struct {
+	WideInputStrictOutput *bool `json:"wide_input_strict_output,omitempty"`
+	StripReferenceMarkers *bool `json:"strip_reference_markers,omitempty"`
+}
+
+type AdminConfig struct {
+	Key               string `json:"key,omitempty"`
+	PasswordHash      string `json:"password_hash,omitempty"`
+	JWTSecret         string `json:"jwt_secret,omitempty"`
+	JWTExpireHours    int    `json:"jwt_expire_hours,omitempty"`
+	JWTValidAfterUnix int64  `json:"jwt_valid_after_unix,omitempty"`
+}
+
+type ServerConfig struct {
+	Port                    string `json:"port,omitempty"`
+	BindAddr                string `json:"bind_addr,omitempty"`
+	LogLevel                string `json:"log_level,omitempty"`
+	StaticAdminDir          string `json:"static_admin_dir,omitempty"`
+	AutoBuildWebUI          *bool  `json:"auto_build_webui,omitempty"`
+	HTTPTotalTimeoutSeconds int    `json:"http_total_timeout_seconds,omitempty"`
+}
+
+type StorageConfig struct {
+	DataDir               string `json:"data_dir,omitempty"`
+	ChatHistoryPath       string `json:"chat_history_path,omitempty"`
+	ChatHistorySQLitePath string `json:"chat_history_sqlite_path,omitempty"`
+	RawStreamSampleRoot   string `json:"raw_stream_sample_root,omitempty"`
+}
+
+type CacheConfig struct {
+	Response ResponseCacheConfig `json:"response,omitempty"`
+}
+
+type ResponseCacheConfig struct {
+	Dir              string `json:"dir,omitempty"`
+	MemoryTTLSeconds int    `json:"memory_ttl_seconds,omitempty"`
+	DiskTTLSeconds   int    `json:"disk_ttl_seconds,omitempty"`
+	MaxBodyBytes     int64  `json:"max_body_bytes,omitempty"`
+	MemoryMaxBytes   int64  `json:"memory_max_bytes,omitempty"`
+	DiskMaxBytes     int64  `json:"disk_max_bytes,omitempty"`
+}
+
+type RuntimeConfig struct {
+	AccountMaxInflight        int `json:"account_max_inflight,omitempty"`
+	AccountMaxQueue           int `json:"account_max_queue,omitempty"`
+	GlobalMaxInflight         int `json:"global_max_inflight,omitempty"`
+	TokenRefreshIntervalHours int `json:"token_refresh_interval_hours,omitempty"`
+}
+
+type ResponsesConfig struct {
+	StoreTTLSeconds int `json:"store_ttl_seconds,omitempty"`
+}
+
+type EmbeddingsConfig struct {
+	Provider string `json:"provider,omitempty"`
+}
+
+type AutoDeleteConfig struct {
+	Mode     string `json:"mode,omitempty"`
+	Sessions bool   `json:"sessions,omitempty"`
+}
+
+type HistorySplitConfig struct {
+	Enabled           *bool `json:"enabled,omitempty"`
+	TriggerAfterTurns *int  `json:"trigger_after_turns,omitempty"`
+}
+
+type CurrentInputFileConfig struct {
+	Enabled  *bool `json:"enabled,omitempty"`
+	MinChars int   `json:"min_chars,omitempty"`
+}
+
+type ThinkingInjectionConfig struct {
+	Enabled *bool  `json:"enabled,omitempty"`
+	Prompt  string `json:"prompt,omitempty"`
+}

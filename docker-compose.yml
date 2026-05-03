@@ -1,0 +1,15 @@
+services:
+  deepseek-web-to-api:
+    image: ghcr.io/meow-calculations/deepseek-web-to-api:latest
+    container_name: deepseek-web-to-api
+    restart: always
+    env_file:
+      - .env
+    ports:
+      # Host port is configurable via DEEPSEEK_WEB_TO_API_HOST_PORT; keep config.json server.port at 5001 for this compose template.
+      - "${DEEPSEEK_WEB_TO_API_HOST_PORT:-6011}:5001"
+    volumes:
+      - ./config.json:/data/config.json   # 配置文件（持久化推荐路径）
+    environment:
+      - TZ=Asia/Shanghai
+      - DEEPSEEK_WEB_TO_API_CONFIG_PATH=/data/config.json

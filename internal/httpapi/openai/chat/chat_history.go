@@ -1,0 +1,288 @@
+package chat
+
+import (
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"DeepSeek_Web_To_API/internal/auth"
+	"DeepSeek_Web_To_API/internal/chathistory"
+	"DeepSeek_Web_To_API/internal/config"
+	openaifmt "DeepSeek_Web_To_API/internal/format/openai"
+	"DeepSeek_Web_To_API/internal/prompt"
+	"DeepSeek_Web_To_API/internal/promptcompat"
+)
+
+const adminWebUISourceHeader = "X-DeepSeek-Web-To-API-Source"
+const legacyAdminWebUISourceHeader = "X-Ds2-Source"
+const adminWebUISourceValue = "admin-webui-api-tester"
+
+type chatHistorySession struct {
+	store       *chathistory.Store
+	entryID     string
+	startedAt   time.Time
+	lastPersist time.Time
+	finalPrompt string
+	startParams chathistory.StartParams
+	disabled    bool
+}
+
+func startChatHistory(store *chathistory.Store, r *http.Request, a *auth.RequestAuth, stdReq promptcompat.StandardRequest) *chatHistorySession {
+	return startChatHistoryWithStatus(store, r, a, stdReq, "streaming")
+}
+
+func startQueuedChatHistory(store *chathistory.Store, r *http.Request, a *auth.RequestAuth, stdReq promptcompat.StandardRequest) *chatHistorySession {
+	return startChatHistoryWithStatus(store, r, a, stdReq, "queued")
+}
+
+func startChatHistoryWithStatus(store *chathistory.Store, r *http.Request, a *auth.RequestAuth, stdReq promptcompat.StandardRequest, status string) *chatHistorySession {
+	if store == nil || r == nil || a == nil {
+		return nil
+	}
+	if !store.Enabled() {
+		return nil
+	}
+	if !shouldCaptureChatHistory(r) {
+		return nil
+	}
+	startParams := chathistory.StartParams{
+		CallerID:    strings.TrimSpace(a.CallerID),
+		AccountID:   strings.TrimSpace(a.AccountID),
+		Status:      strings.TrimSpace(status),
+		Model:       strings.TrimSpace(stdReq.ResponseModel),
+		Stream:      stdReq.Stream,
+		UserInput:   extractSingleUserInput(stdReq.Messages),
+		Messages:    extractAllMessages(stdReq.Messages),
+		HistoryText: stdReq.HistoryText,
+		FinalPrompt: stdReq.FinalPrompt,
+	}
+	entry, err := store.Start(startParams)
+	session := &chatHistorySession{
+		store:       store,
+		entryID:     entry.ID,
+		startedAt:   time.Now(),
+		lastPersist: time.Now(),
+		finalPrompt: stdReq.FinalPrompt,
+		startParams: startParams,
+	}
+	if err != nil {
+		if entry.ID == "" {
+			config.Logger.Warn("[chat_history] start failed", "error", err)
+			return nil
+		}
+		config.Logger.Warn("[chat_history] start persisted in memory after write failure", "error", err)
+	}
+	return session
+}
+
+func shouldCaptureChatHistory(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	source := strings.TrimSpace(r.Header.Get(adminWebUISourceHeader))
+	if source == "" {
+		source = strings.TrimSpace(r.Header.Get(legacyAdminWebUISourceHeader))
+	}
+	return source != adminWebUISourceValue
+}
+
+func (s *chatHistorySession) bindAuth(a *auth.RequestAuth) {
+	if s == nil || s.store == nil || s.disabled || a == nil {
+		return
+	}
+	callerID := strings.TrimSpace(a.CallerID)
+	accountID := strings.TrimSpace(a.AccountID)
+	if callerID == "" && accountID == "" {
+		return
+	}
+	s.startParams.CallerID = callerID
+	s.startParams.AccountID = accountID
+	s.startParams.Status = "streaming"
+	s.persistUpdate(chathistory.UpdateParams{
+		CallerID:  callerID,
+		AccountID: accountID,
+		Status:    "streaming",
+		ElapsedMs: time.Since(s.startedAt).Milliseconds(),
+	})
+}
+
+func (s *chatHistorySession) updateHistoryText(historyText string) {
+	if s == nil || s.store == nil || s.disabled {
+		return
+	}
+	if strings.TrimSpace(historyText) == "" {
+		return
+	}
+	s.startParams.HistoryText = historyText
+	s.persistUpdate(chathistory.UpdateParams{
+		HistoryText: historyText,
+		ElapsedMs:   time.Since(s.startedAt).Milliseconds(),
+	})
+}
+
+func extractSingleUserInput(messages []any) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg, ok := messages[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		role := strings.ToLower(strings.TrimSpace(asString(msg["role"])))
+		if role != "user" {
+			continue
+		}
+		if normalized := strings.TrimSpace(prompt.NormalizeContent(msg["content"])); normalized != "" {
+			return normalized
+		}
+	}
+	return ""
+}
+
+func extractAllMessages(messages []any) []chathistory.Message {
+	out := make([]chathistory.Message, 0, len(messages))
+	for _, raw := range messages {
+		msg, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		role := strings.ToLower(strings.TrimSpace(asString(msg["role"])))
+		content := strings.TrimSpace(prompt.NormalizeContent(msg["content"]))
+		if role == "" || content == "" {
+			continue
+		}
+		out = append(out, chathistory.Message{
+			Role:    role,
+			Content: content,
+		})
+	}
+	return out
+}
+
+func (s *chatHistorySession) progress(thinking, content string) {
+	if s == nil || s.store == nil || s.disabled {
+		return
+	}
+	now := time.Now()
+	if now.Sub(s.lastPersist) < 250*time.Millisecond {
+		return
+	}
+	s.lastPersist = now
+	s.persistUpdate(chathistory.UpdateParams{
+		Status:           "streaming",
+		ReasoningContent: thinking,
+		Content:          content,
+		StatusCode:       http.StatusOK,
+		ElapsedMs:        time.Since(s.startedAt).Milliseconds(),
+	})
+}
+
+func (s *chatHistorySession) success(statusCode int, thinking, content, finishReason string, usage map[string]any) {
+	if s == nil || s.store == nil || s.disabled {
+		return
+	}
+	s.persistUpdate(chathistory.UpdateParams{
+		Status:           "success",
+		ReasoningContent: thinking,
+		Content:          content,
+		StatusCode:       statusCode,
+		ElapsedMs:        time.Since(s.startedAt).Milliseconds(),
+		FinishReason:     finishReason,
+		Usage:            usage,
+		Completed:        true,
+	})
+}
+
+func (s *chatHistorySession) error(statusCode int, message, finishReason, thinking, content string) {
+	if s == nil || s.store == nil || s.disabled {
+		return
+	}
+	s.persistUpdate(chathistory.UpdateParams{
+		Status:           "error",
+		ReasoningContent: thinking,
+		Content:          content,
+		Error:            message,
+		StatusCode:       statusCode,
+		ElapsedMs:        time.Since(s.startedAt).Milliseconds(),
+		FinishReason:     finishReason,
+		Completed:        true,
+	})
+}
+
+func (s *chatHistorySession) stopped(thinking, content, finishReason string) {
+	if s == nil || s.store == nil || s.disabled {
+		return
+	}
+	s.persistUpdate(chathistory.UpdateParams{
+		Status:           "stopped",
+		ReasoningContent: thinking,
+		Content:          content,
+		StatusCode:       http.StatusOK,
+		ElapsedMs:        time.Since(s.startedAt).Milliseconds(),
+		FinishReason:     finishReason,
+		Usage:            openaifmt.BuildChatUsage(s.finalPrompt, thinking, content),
+		Completed:        true,
+	})
+}
+
+func (s *chatHistorySession) retryMissingEntry() bool {
+	if s == nil || s.store == nil || s.disabled {
+		return false
+	}
+	entry, err := s.store.Start(s.startParams)
+	if errors.Is(err, chathistory.ErrDisabled) {
+		s.disabled = true
+		return false
+	}
+	if entry.ID == "" {
+		if err != nil {
+			config.Logger.Warn("[chat_history] recreate missing entry failed", "error", err)
+		}
+		return false
+	}
+	s.entryID = entry.ID
+	if err != nil {
+		config.Logger.Warn("[chat_history] recreate missing entry persisted in memory after write failure", "error", err)
+	}
+	return true
+}
+
+func (s *chatHistorySession) persistUpdate(params chathistory.UpdateParams) {
+	if s == nil || s.store == nil || s.disabled {
+		return
+	}
+	if _, err := s.store.Update(s.entryID, params); err != nil {
+		s.handlePersistError(params, err)
+	}
+}
+
+func (s *chatHistorySession) handlePersistError(params chathistory.UpdateParams, err error) {
+	if err == nil || s == nil {
+		return
+	}
+	if errors.Is(err, chathistory.ErrDisabled) {
+		s.disabled = true
+		return
+	}
+	if isChatHistoryMissingError(err) {
+		if s.retryMissingEntry() {
+			if _, retryErr := s.store.Update(s.entryID, params); retryErr != nil {
+				if errors.Is(retryErr, chathistory.ErrDisabled) || isChatHistoryMissingError(retryErr) {
+					s.disabled = true
+					return
+				}
+				config.Logger.Warn("[chat_history] retry after missing entry failed", "error", retryErr)
+			}
+			return
+		}
+		s.disabled = true
+		return
+	}
+	config.Logger.Warn("[chat_history] update failed", "error", err)
+}
+
+func isChatHistoryMissingError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "not found")
+}

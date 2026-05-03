@@ -1,0 +1,52 @@
+name: Bug report
+description: Report a defect or regression
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: dropdown
+    attributes:
+      label: Deployment mode
+      multiple: true
+      options:
+        - Local binary
+        - Docker / GHCR
+        - Vercel
+        - Source build
+        - Other
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Version
+      description: Release tag, commit SHA, or Docker image tag.
+    validations:
+      required: true
+  - type: dropdown
+    attributes:
+      label: Operating system
+      multiple: true
+      options:
+        - Windows
+        - macOS
+        - Ubuntu
+        - Other Linux
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Problem description
+      description: Describe what went wrong and which API/client was used.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest reproducible request or workflow. Redact tokens, cookies, accounts, and passwords.
+  - type: textarea
+    attributes:
+      label: Expected behavior
+  - type: textarea
+    attributes:
+      label: Logs or screenshots
+      description: Redact tokens, cookies, account credentials, proxy credentials, and raw private conversations.

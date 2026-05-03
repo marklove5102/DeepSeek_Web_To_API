@@ -1,0 +1,120 @@
+{
+  "_comment": "DeepSeek_Web_To_API 配置文件示例 - 复制为 config.json 使用",
+  "_doc": "详细文档: https://github.com/Meow-Calculations/DeepSeek_Web_To_API",
+  "keys": [
+    "your-api-key-1",
+    "your-api-key-2"
+  ],
+  "api_keys": [
+    {
+      "key": "your-api-key-1",
+      "name": "主 API Key",
+      "remark": "给 OpenAI 客户端使用"
+    },
+    {
+      "key": "your-api-key-2",
+      "name": "备用 API Key",
+      "remark": "压测或临时调试"
+    }
+  ],
+  "accounts": [
+    {
+      "_comment": "邮箱登录方式",
+      "name": "主账号",
+      "remark": "优先用于生产流量",
+      "email": "example1@example.com",
+      "password": "your-password-1"
+    },
+    {
+      "_comment": "邮箱登录方式 - 账号2",
+      "name": "备用账号",
+      "email": "example2@example.com",
+      "password": "your-password-2"
+    },
+    {
+      "_comment": "手机号登录方式（中国大陆）",
+      "mobile": "12345678901",
+      "password": "your-password-3"
+    }
+  ],
+  "proxies": [
+    {
+      "id": "proxy-main",
+      "name": "主代理",
+      "type": "socks5h",
+      "host": "127.0.0.1",
+      "port": 1080,
+      "username": "",
+      "password": ""
+    }
+  ],
+  "model_aliases": {
+    "gpt-4o": "deepseek-v4-flash",
+    "gpt-5.5": "deepseek-v4-flash",
+    "gpt-5.3-codex": "deepseek-v4-pro",
+    "o3": "deepseek-v4-pro"
+  },
+  "compat": {
+    "wide_input_strict_output": true,
+    "strip_reference_markers": true
+  },
+  "responses": {
+    "store_ttl_seconds": 900
+  },
+  "current_input_file": {
+    "enabled": true,
+    "min_chars": 0
+  },
+  "thinking_injection": {
+    "enabled": true,
+    "prompt": ""
+  },
+  "embeddings": {
+    "provider": "deterministic"
+  },
+  "admin": {
+    "key": "change-me-admin-key",
+    "password_hash": "",
+    "jwt_secret": "change-me-jwt-secret",
+    "jwt_expire_hours": 24,
+    "jwt_valid_after_unix": 0
+  },
+  "server": {
+    "port": "5001",
+    "bind_addr": "0.0.0.0",
+    "log_level": "INFO",
+    "static_admin_dir": "static/admin",
+    "auto_build_webui": true,
+    "http_total_timeout_seconds": 7200
+  },
+  "storage": {
+    "data_dir": "data",
+    "chat_history_path": "data/chat_history.json",
+    "chat_history_sqlite_path": "data/chat_history.sqlite",
+    "raw_stream_sample_root": "tests/raw_stream_samples"
+  },
+  "cache": {
+    "response": {
+      "dir": "data/response_cache",
+      "memory_ttl_seconds": 300,
+      "memory_max_bytes": 3800000000,
+      "disk_ttl_seconds": 14400,
+      "disk_max_bytes": 16000000000,
+      "max_body_bytes": 67108864
+    }
+  },
+  "runtime": {
+    "account_max_inflight": 2,
+    "account_max_queue": 0,
+    "global_max_inflight": 0,
+    "token_refresh_interval_hours": 6
+  },
+  "auto_delete": {
+    "mode": "none",
+    "sessions": false
+  },
+  "history_split": {
+    "enabled": false,
+    "trigger_after_turns": 1
+  }
+}

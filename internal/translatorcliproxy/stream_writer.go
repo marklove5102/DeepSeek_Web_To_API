@@ -1,0 +1,352 @@
+package translatorcliproxy
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"strconv"
+	"strings"
+
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+)
+
+// OpenAIStreamTranslatorWriter translates OpenAI SSE output to another client format in real-time.
+type OpenAIStreamTranslatorWriter struct {
+	dst           http.ResponseWriter
+	target        sdktranslator.Format
+	model         string
+	originalReq   []byte
+	translatedReq []byte
+	param         any
+	statusCode    int
+	headersSent   bool
+	lineBuf       bytes.Buffer
+}
+
+func NewOpenAIStreamTranslatorWriter(dst http.ResponseWriter, target sdktranslator.Format, model string, originalReq, translatedReq []byte) *OpenAIStreamTranslatorWriter {
+	return &OpenAIStreamTranslatorWriter{
+		dst:           dst,
+		target:        target,
+		model:         model,
+		originalReq:   originalReq,
+		translatedReq: translatedReq,
+		statusCode:    http.StatusOK,
+	}
+}
+
+func (w *OpenAIStreamTranslatorWriter) Header() http.Header {
+	return w.dst.Header()
+}
+
+func (w *OpenAIStreamTranslatorWriter) WriteHeader(statusCode int) {
+	if w.headersSent {
+		return
+	}
+	w.statusCode = statusCode
+	w.headersSent = true
+	if w.target == sdktranslator.FormatClaude && (statusCode < 200 || statusCode >= 300) {
+		w.dst.Header().Set("Content-Type", "application/json; charset=utf-8")
+	}
+	w.dst.WriteHeader(statusCode)
+}
+
+func (w *OpenAIStreamTranslatorWriter) Write(p []byte) (int, error) {
+	if !w.headersSent {
+		w.WriteHeader(http.StatusOK)
+	}
+	if w.statusCode < 200 || w.statusCode >= 300 {
+		if w.target == sdktranslator.FormatClaude {
+			if converted, ok := convertOpenAIErrorBodyToClaude(p); ok {
+				return w.dst.Write(converted)
+			}
+		}
+		return w.dst.Write(p)
+	}
+	w.lineBuf.Write(p)
+	for {
+		line, ok := w.readOneLine()
+		if !ok {
+			break
+		}
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) == 0 {
+			continue
+		}
+		if bytes.HasPrefix(trimmed, []byte(":")) {
+			if w.target == sdktranslator.FormatClaude {
+				if _, err := w.dst.Write([]byte("event: ping\ndata: {\"type\":\"ping\"}\n\n")); err != nil {
+					return len(p), err
+				}
+				if f, ok := w.dst.(http.Flusher); ok {
+					f.Flush()
+				}
+				continue
+			}
+			if _, err := w.dst.Write(trimmed); err != nil {
+				return len(p), err
+			}
+			if _, err := w.dst.Write([]byte("\n\n")); err != nil {
+				return len(p), err
+			}
+			if f, ok := w.dst.(http.Flusher); ok {
+				f.Flush()
+			}
+			continue
+		}
+		if !bytes.HasPrefix(trimmed, []byte("data:")) {
+			continue
+		}
+		if w.target == sdktranslator.FormatClaude {
+			if payload, ok := convertOpenAIStreamErrorToClaudeSSE(trimmed); ok {
+				if _, err := w.dst.Write(payload); err != nil {
+					return len(p), err
+				}
+				if f, ok := w.dst.(http.Flusher); ok {
+					f.Flush()
+				}
+				continue
+			}
+		}
+		usage, hasUsage := extractOpenAIUsage(trimmed)
+		chunks := sdktranslator.TranslateStream(context.Background(), sdktranslator.FormatOpenAI, w.target, w.model, w.originalReq, w.translatedReq, trimmed, &w.param)
+		if hasUsage {
+			for i := range chunks {
+				chunks[i] = injectStreamUsageMetadata(chunks[i], w.target, usage)
+			}
+		}
+		for i := range chunks {
+			if len(chunks[i]) == 0 {
+				continue
+			}
+			if _, err := w.dst.Write(chunks[i]); err != nil {
+				return len(p), err
+			}
+			if !bytes.HasSuffix(chunks[i], []byte("\n")) {
+				if _, err := w.dst.Write([]byte("\n")); err != nil {
+					return len(p), err
+				}
+			}
+		}
+		if f, ok := w.dst.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
+	return len(p), nil
+}
+
+func (w *OpenAIStreamTranslatorWriter) Flush() {
+	if f, ok := w.dst.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *OpenAIStreamTranslatorWriter) Unwrap() http.ResponseWriter {
+	return w.dst
+}
+
+func (w *OpenAIStreamTranslatorWriter) readOneLine() ([]byte, bool) {
+	b := w.lineBuf.Bytes()
+	idx := bytes.IndexByte(b, '\n')
+	if idx < 0 {
+		return nil, false
+	}
+	line := append([]byte(nil), b[:idx]...)
+	w.lineBuf.Next(idx + 1)
+	return line, true
+}
+
+type openAIUsage struct {
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+}
+
+func convertOpenAIStreamErrorToClaudeSSE(line []byte) ([]byte, bool) {
+	raw := strings.TrimSpace(strings.TrimPrefix(string(line), "data:"))
+	if raw == "" || raw == "[DONE]" {
+		return nil, false
+	}
+	payload, ok := openAIErrorToClaudePayload([]byte(raw))
+	if !ok {
+		return nil, false
+	}
+	return []byte("event: error\ndata: " + string(payload) + "\n\n"), true
+}
+
+func convertOpenAIErrorBodyToClaude(raw []byte) ([]byte, bool) {
+	return openAIErrorToClaudePayload(raw)
+}
+
+func openAIErrorToClaudePayload(raw []byte) ([]byte, bool) {
+	obj := map[string]any{}
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, false
+	}
+	errObj, _ := obj["error"].(map[string]any)
+	if errObj == nil {
+		return nil, false
+	}
+	message := strings.TrimSpace(asString(errObj["message"]))
+	if message == "" {
+		message = "upstream api error"
+	}
+	typ := claudeErrorTypeFromOpenAI(obj, errObj)
+	out, err := json.Marshal(map[string]any{
+		"type": "error",
+		"error": map[string]any{
+			"type":    typ,
+			"message": message,
+		},
+	})
+	if err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
+func claudeErrorTypeFromOpenAI(obj, errObj map[string]any) string {
+	if status := toInt(obj["status_code"]); status > 0 {
+		switch {
+		case status == http.StatusTooManyRequests:
+			return "rate_limit_error"
+		case status == http.StatusUnauthorized:
+			return "authentication_error"
+		case status == http.StatusForbidden:
+			return "permission_error"
+		case status == http.StatusNotFound:
+			return "not_found_error"
+		case status >= 500:
+			return "api_error"
+		}
+	}
+	rawType := strings.TrimSpace(asString(errObj["type"]))
+	switch rawType {
+	case "rate_limit_error", "authentication_error", "permission_error", "not_found_error", "api_error", "invalid_request_error":
+		return rawType
+	case "service_unavailable_error":
+		return "api_error"
+	}
+	code := strings.TrimSpace(asString(errObj["code"]))
+	switch code {
+	case "rate_limit_exceeded", "upstream_empty_output":
+		return "rate_limit_error"
+	case "authentication_failed":
+		return "authentication_error"
+	case "forbidden":
+		return "permission_error"
+	case "not_found":
+		return "not_found_error"
+	}
+	return "api_error"
+}
+
+func extractOpenAIUsage(line []byte) (openAIUsage, bool) {
+	raw := strings.TrimSpace(strings.TrimPrefix(string(line), "data:"))
+	if raw == "" || raw == "[DONE]" {
+		return openAIUsage{}, false
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return openAIUsage{}, false
+	}
+	usageObj, _ := payload["usage"].(map[string]any)
+	if usageObj == nil {
+		return openAIUsage{}, false
+	}
+	p := toInt(usageObj["prompt_tokens"])
+	c := toInt(usageObj["completion_tokens"])
+	t := toInt(usageObj["total_tokens"])
+	if p <= 0 {
+		p = toInt(usageObj["input_tokens"])
+	}
+	if c <= 0 {
+		c = toInt(usageObj["output_tokens"])
+	}
+	if p <= 0 && c <= 0 && t <= 0 {
+		return openAIUsage{}, false
+	}
+	if t <= 0 {
+		t = p + c
+	}
+	return openAIUsage{PromptTokens: p, CompletionTokens: c, TotalTokens: t}, true
+}
+
+func injectStreamUsageMetadata(chunk []byte, target sdktranslator.Format, usage openAIUsage) []byte {
+	if target != sdktranslator.FormatGemini {
+		return chunk
+	}
+	suffix := ""
+	switch {
+	case bytes.HasSuffix(chunk, []byte("\n\n")):
+		suffix = "\n\n"
+	case bytes.HasSuffix(chunk, []byte("\n")):
+		suffix = "\n"
+	}
+	text := strings.TrimSpace(string(chunk))
+	if text == "" {
+		return chunk
+	}
+	var (
+		hasDataPrefix bool
+		jsonText      = text
+	)
+	if strings.HasPrefix(jsonText, "data:") {
+		hasDataPrefix = true
+		jsonText = strings.TrimSpace(strings.TrimPrefix(jsonText, "data:"))
+	}
+	if jsonText == "" || jsonText == "[DONE]" {
+		return chunk
+	}
+	obj := map[string]any{}
+	if err := json.Unmarshal([]byte(jsonText), &obj); err != nil {
+		return chunk
+	}
+	if _, ok := obj["candidates"]; !ok {
+		return chunk
+	}
+	obj["usageMetadata"] = map[string]any{
+		"promptTokenCount":     usage.PromptTokens,
+		"candidatesTokenCount": usage.CompletionTokens,
+		"totalTokenCount":      usage.TotalTokens,
+	}
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return chunk
+	}
+	if hasDataPrefix {
+		return []byte("data: " + string(b) + suffix)
+	}
+	if suffix != "" {
+		return append(b, []byte(suffix)...)
+	}
+	return b
+}
+
+func toInt(v any) int {
+	switch x := v.(type) {
+	case int:
+		return x
+	case int32:
+		return int(x)
+	case int64:
+		return int(x)
+	case float64:
+		return int(x)
+	case float32:
+		return int(x)
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(x))
+		if err != nil {
+			return 0
+		}
+		return n
+	default:
+		return 0
+	}
+}
+
+func asString(v any) string {
+	s, _ := v.(string)
+	return s
+}

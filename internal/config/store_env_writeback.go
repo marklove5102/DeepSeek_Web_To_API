@@ -1,0 +1,48 @@
+package config
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+func envWritebackEnabled() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("DEEPSEEK_WEB_TO_API_ENV_WRITEBACK")))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func (s *Store) IsEnvWritebackEnabled() bool {
+	return envWritebackEnabled()
+}
+
+func (s *Store) HasEnvConfigSource() bool {
+	rawCfg := strings.TrimSpace(os.Getenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON"))
+	return rawCfg != ""
+}
+
+func (s *Store) ConfigPath() string {
+	return s.path
+}
+
+func writeConfigFile(path string, cfg Config) error {
+	persistCfg := cfg.Clone()
+	persistCfg.ClearAccountTokens()
+	b, err := json.MarshalIndent(persistCfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeConfigBytes(path, b)
+}
+
+func writeConfigBytes(path string, b []byte) error {
+	dir := filepath.Dir(path)
+	if dir == "." || dir == "" {
+		return os.WriteFile(path, b, 0o600)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("mkdir config dir: %w", err)
+	}
+	return os.WriteFile(path, b, 0o600)
+}

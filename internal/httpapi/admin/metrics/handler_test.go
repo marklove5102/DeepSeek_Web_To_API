@@ -1,0 +1,158 @@
+package metrics
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strconv"
+	"testing"
+
+	"DeepSeek_Web_To_API/internal/chathistory"
+)
+
+type cacheStatsStub struct {
+	stats map[string]any
+}
+
+func (s cacheStatsStub) Stats() map[string]any {
+	return s.stats
+}
+
+func TestGetOverviewMetricsReturnsUsageCostAndHost(t *testing.T) {
+	store := chathistory.New(filepath.Join(t.TempDir(), "chat_history.json"))
+	entry, err := store.Start(chathistory.StartParams{
+		Model:     "deepseek-v4-pro",
+		UserInput: "hello",
+	})
+	if err != nil {
+		t.Fatalf("start history failed: %v", err)
+	}
+	if _, err := store.Update(entry.ID, chathistory.UpdateParams{
+		Status: "success",
+		Usage: map[string]any{
+			"input_tokens":            1000,
+			"output_tokens":           500,
+			"input_cache_hit_tokens":  200,
+			"input_cache_miss_tokens": 800,
+			"total_tokens":            1500,
+		},
+		Completed: true,
+	}); err != nil {
+		t.Fatalf("update history failed: %v", err)
+	}
+
+	h := &Handler{
+		ChatHistory: store,
+		ResponseCache: cacheStatsStub{stats: map[string]any{
+			"lookups":                    int64(5),
+			"hits":                       int64(3),
+			"misses":                     int64(2),
+			"stores":                     int64(1),
+			"cacheable_lookups":          int64(4),
+			"cacheable_misses":           int64(1),
+			"uncacheable_misses":         int64(1),
+			"uncacheable_status_non_2xx": int64(1),
+			"memory_hits":                int64(2),
+			"disk_hits":                  int64(1),
+			"memory_items":               2,
+			"memory_bytes":               int64(2048),
+			"memory_max_bytes":           int64(4096),
+			"memory_ttl_seconds":         300,
+			"disk_max_bytes":             int64(8192),
+			"disk_ttl_seconds":           14400,
+			"compression":                "gzip",
+		}},
+	}
+	req := httptest.NewRequest(http.MethodGet, "/admin/metrics/overview", nil)
+	rec := httptest.NewRecorder()
+	h.getOverviewMetrics(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var body struct {
+		Success    bool `json:"success"`
+		Throughput struct {
+			QPS              float64 `json:"qps"`
+			RequestsInWindow int64   `json:"requests_in_window"`
+			TokensPerSecond  float64 `json:"tokens_per_second"`
+			TokensInWindow   int64   `json:"tokens_in_window"`
+		} `json:"throughput"`
+		Tokens chathistory.TokenUsageStats `json:"tokens"`
+		Cost   struct {
+			Currency      string  `json:"currency"`
+			TotalUSD      float64 `json:"total_usd"`
+			PricingSource string  `json:"pricing_source"`
+		} `json:"cost"`
+		Cache   overviewCacheStats   `json:"cache"`
+		History overviewHistoryStats `json:"history"`
+		Host    hostSnapshot         `json:"host"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+	if !body.Success {
+		t.Fatalf("expected success response")
+	}
+	if body.Throughput.RequestsInWindow != 1 || body.Throughput.TokensInWindow != 1500 {
+		t.Fatalf("unexpected throughput: %#v", body.Throughput)
+	}
+	if body.Tokens.Total.TotalTokens != 1500 {
+		t.Fatalf("unexpected token totals: %#v", body.Tokens.Total)
+	}
+	if body.Cost.Currency != pricingCurrency || body.Cost.TotalUSD <= 0 || body.Cost.PricingSource != pricingSourceURL {
+		t.Fatalf("unexpected cost breakdown: %#v", body.Cost)
+	}
+	if body.Cache.HitRate != 60 || body.Cache.MissRate != 40 || body.Cache.CacheableHitRate != 75 || body.Cache.CacheableMissRate != 25 || body.Cache.CacheableMisses != 1 || body.Cache.UncacheableMisses != 1 || body.Cache.MemoryHits != 2 || body.Cache.DiskHits != 1 {
+		t.Fatalf("unexpected cache metrics: %#v", body.Cache)
+	}
+	if body.History.Total != 1 || body.History.Limit != chathistory.DefaultLimit || body.History.Success != 1 || body.History.SuccessRate != 100 {
+		t.Fatalf("unexpected history metrics: %#v", body.History)
+	}
+	if body.Host.CPU.Cores <= 0 {
+		t.Fatalf("expected host cpu cores, got %#v", body.Host.CPU)
+	}
+}
+
+func TestGetOverviewMetricsWorksWithoutHistoryStore(t *testing.T) {
+	h := &Handler{}
+	req := httptest.NewRequest(http.MethodGet, "/admin/metrics/overview", nil)
+	rec := httptest.NewRecorder()
+	h.getOverviewMetrics(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body overviewMetricsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response failed: %v", err)
+	}
+	if !body.Success || body.WindowSeconds != int64(overviewWindow.Seconds()) {
+		t.Fatalf("unexpected empty metrics response: %#v", body)
+	}
+	if body.Cache.Lookups != 0 || body.Cache.HitRate != 0 {
+		t.Fatalf("expected empty cache metrics without cache provider, got %#v", body.Cache)
+	}
+	if body.History.Total != 0 || body.History.Limit != chathistory.DefaultLimit {
+		t.Fatalf("expected default history metrics without history store, got %#v", body.History)
+	}
+	if body.History.SuccessRate != 100 || len(body.History.ExcludedStatusCodes) == 0 {
+		t.Fatalf("expected default success-rate metadata without history store, got %#v", body.History)
+	}
+}
+
+func TestInt64StatRejectsOverflowingUnsignedValues(t *testing.T) {
+	stats := map[string]any{"value": uint64(maxInt64StatUint + 1)}
+	if got := int64Stat(stats, "value"); got != 0 {
+		t.Fatalf("expected overflowing uint64 to be rejected, got %d", got)
+	}
+
+	if strconv.IntSize == 64 {
+		stats["value"] = uint(maxInt64StatUint + 1)
+		if got := int64Stat(stats, "value"); got != 0 {
+			t.Fatalf("expected overflowing uint to be rejected, got %d", got)
+		}
+	}
+}

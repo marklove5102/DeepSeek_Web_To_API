@@ -1,0 +1,33 @@
+# DeepSeek_Web_To_API 开发环境配置
+# 特性：
+#   - 源代码挂载（热重载）
+#   - 调试日志级别
+#   - 自动重启
+#
+# 使用说明：
+#   docker-compose -f docker-compose.dev.yml up
+
+services:
+  deepseek-web-to-api:
+    build:
+      context: .
+      target: go-builder
+    image: deepseek-web-to-api:dev
+    container_name: deepseek-web-to-api-dev
+    command: ["go", "run", "./cmd/DeepSeek_Web_To_API"]
+    ports:
+      # Host port is configurable via DEEPSEEK_WEB_TO_API_HOST_PORT; container port stays fixed at 5001.
+      - "${DEEPSEEK_WEB_TO_API_HOST_PORT:-6011}:5001"
+    env_file:
+      - .env
+    environment:
+      - HOST=0.0.0.0
+      - LOG_LEVEL=DEBUG
+    volumes:
+      # 源代码挂载（开发时实时生效）
+      - ./:/app
+      # 配置文件挂载（便于本地修改）
+      - ./config.json:/app/config.json
+    restart: "no"
+    stdin_open: true
+    tty: true
