@@ -6,10 +6,13 @@ services:
     env_file:
       - .env
     ports:
-      # Host port is configurable via DEEPSEEK_WEB_TO_API_HOST_PORT; keep config.json server.port at 5001 for this compose template.
+      # Host port is configurable via DEEPSEEK_WEB_TO_API_HOST_PORT; container listens on 5001.
       - "${DEEPSEEK_WEB_TO_API_HOST_PORT:-6011}:5001"
     volumes:
-      - ./config.json:/data/config.json   # 配置文件（持久化推荐路径）
+      - ./data:/app/data   # config writeback, accounts SQLite, history SQLite, response cache
     environment:
       - TZ=Asia/Shanghai
-      - DEEPSEEK_WEB_TO_API_CONFIG_PATH=/data/config.json
+      - DEEPSEEK_WEB_TO_API_BIND_ADDR=0.0.0.0
+      - DEEPSEEK_WEB_TO_API_ENV_WRITEBACK=true
+      - DEEPSEEK_WEB_TO_API_CONFIG_PATH=/app/data/config.json
+      - DEEPSEEK_WEB_TO_API_ACCOUNTS_SQLITE_PATH=/app/data/accounts.sqlite

@@ -169,6 +169,7 @@ type ServerConfig struct {
 
 type StorageConfig struct {
 	DataDir               string `json:"data_dir,omitempty"`
+	AccountsSQLitePath    string `json:"accounts_sqlite_path,omitempty"`
 	ChatHistoryPath       string `json:"chat_history_path,omitempty"`
 	ChatHistorySQLitePath string `json:"chat_history_sqlite_path,omitempty"`
 	RawStreamSampleRoot   string `json:"raw_stream_sample_root,omitempty"`

@@ -57,6 +57,10 @@ func ChatHistoryPath() string {
 	return ResolvePath("DEEPSEEK_WEB_TO_API_CHAT_HISTORY_PATH", "data/chat_history.json")
 }
 
+func AccountsSQLitePath() string {
+	return ResolvePath("DEEPSEEK_WEB_TO_API_ACCOUNTS_SQLITE_PATH", "data/accounts.sqlite")
+}
+
 func ResponseCacheDir() string {
 	return ResolvePath("DEEPSEEK_WEB_TO_API_RESPONSE_CACHE_DIR", "data/response_cache")
 }

@@ -1,15 +1,13 @@
 import { X } from 'lucide-react'
 import { v4 as uuidv4 } from 'uuid'
 
-import { maskSecret } from '../../utils/maskSecret'
-
 export default function AddKeyModal({ show, t, editingKey, newKey, setNewKey, loading, onClose, onAdd }) {
     if (!show) {
         return null
     }
 
     const isEditing = Boolean(editingKey?.key)
-    const displayKey = isEditing ? maskSecret(editingKey?.key || newKey.key) : newKey.key
+    const displayKey = newKey.key
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 backdrop-blur-sm p-4 animate-in fade-in">
@@ -26,25 +24,22 @@ export default function AddKeyModal({ show, t, editingKey, newKey, setNewKey, lo
                         <div className="flex gap-2">
                             <input
                                 type="text"
-                                className={isEditing ? "input-field bg-muted/30 flex-1 cursor-not-allowed" : "input-field bg-card flex-1"}
-                                placeholder={isEditing ? t('accountManager.keyReadonlyPlaceholder') : t('accountManager.newKeyPlaceholder')}
+                                className="input-field bg-card flex-1"
+                                placeholder={t('accountManager.newKeyPlaceholder')}
                                 value={displayKey}
                                 onChange={e => setNewKey({ ...newKey, key: e.target.value })}
-                                autoFocus={!isEditing}
-                                readOnly={isEditing}
+                                autoFocus
                             />
-                            {!isEditing && (
-                                <button
-                                    type="button"
-                                    onClick={() => setNewKey({ ...newKey, key: 'sk-' + uuidv4().replace(/-/g, '') })}
-                                    className="btn btn-secondary whitespace-nowrap"
-                                >
-                                    {t('accountManager.generate')}
-                                </button>
-                            )}
+                            <button
+                                type="button"
+                                onClick={() => setNewKey({ ...newKey, key: 'sk-' + uuidv4().replace(/-/g, '') })}
+                                className="btn btn-secondary whitespace-nowrap"
+                            >
+                                {t('accountManager.generate')}
+                            </button>
                         </div>
                         <p className="text-xs text-muted-foreground mt-1.5">
-                            {isEditing ? t('accountManager.keyReadonlyHint') : t('accountManager.generateHint')}
+                            {isEditing ? t('accountManager.keyEditableHint') : t('accountManager.generateHint')}
                         </p>
                     </div>
                     <div>

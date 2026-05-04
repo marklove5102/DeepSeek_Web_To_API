@@ -93,6 +93,26 @@ func (s *Store) ChatHistoryPath() string {
 	return ChatHistoryPath()
 }
 
+func (s *Store) AccountsSQLitePath() string {
+	if raw := strings.TrimSpace(os.Getenv("DEEPSEEK_WEB_TO_API_ACCOUNTS_SQLITE_PATH")); raw != "" {
+		return resolvePathValue(raw, "data/accounts.sqlite")
+	}
+	s.mu.RLock()
+	dataDir := s.cfg.Storage.DataDir
+	configured := s.cfg.Storage.AccountsSQLitePath
+	s.mu.RUnlock()
+	if strings.TrimSpace(configured) != "" {
+		return resolvePathValue(configured, "data/accounts.sqlite")
+	}
+	if strings.TrimSpace(dataDir) != "" {
+		return filepath.Join(resolvePathValue(dataDir, "data"), "accounts.sqlite")
+	}
+	if raw := strings.TrimSpace(os.Getenv("DEEPSEEK_WEB_TO_API_CONFIG_PATH")); raw != "" {
+		return filepath.Join(filepath.Dir(resolvePathValue(raw, "config.json")), "accounts.sqlite")
+	}
+	return AccountsSQLitePath()
+}
+
 func (s *Store) ChatHistorySQLitePath() string {
 	if raw := strings.TrimSpace(os.Getenv("DEEPSEEK_WEB_TO_API_CHAT_HISTORY_SQLITE_PATH")); raw != "" {
 		return resolvePathValue(raw, "data/chat_history.sqlite")

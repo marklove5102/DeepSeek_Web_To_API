@@ -10,10 +10,16 @@ import (
 func loadStore() (*Store, error) {
 	cfg, fromEnv, err := loadConfig()
 	cfg.NormalizeCredentials()
+	accountsDB, accounts, accountsErr := newAccountSQLiteStore(accountSQLitePathForConfig(cfg, fromEnv), cfg.Accounts)
+	if accountsErr != nil {
+		err = errors.Join(err, accountsErr)
+	} else if accountsDB != nil {
+		cfg.Accounts = accounts
+	}
 	if validateErr := ValidateConfig(cfg); validateErr != nil {
 		err = errors.Join(err, validateErr)
 	}
-	return &Store{cfg: cfg, path: ConfigPath(), fromEnv: fromEnv}, err
+	return &Store{cfg: cfg, path: ConfigPath(), fromEnv: fromEnv, accountsDB: accountsDB}, err
 }
 
 func loadConfig() (Config, bool, error) {

@@ -28,6 +28,11 @@ func main() {
 		config.Logger.Error("server initialization failed", "error", err)
 		os.Exit(1)
 	}
+	defer func() {
+		if err := app.Store.Close(); err != nil {
+			config.Logger.Warn("config store close failed", "error", err)
+		}
+	}()
 	config.RefreshLoggerWithLevel(app.Store.ServerLogLevel())
 	webui.EnsureBuiltOnStartup(app.Store)
 	if err := auth.ValidateAdminRuntimeSecurity(app.Store); err != nil {

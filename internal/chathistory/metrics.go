@@ -31,6 +31,8 @@ var FailureRateExcludedStatusCodes = []int{401, 403, 502, 504, 524}
 
 type OutcomeStats struct {
 	Total                   int64   `json:"total"`
+	RetainedTotal           int64   `json:"retained_total,omitempty"`
+	PrunedTotal             int64   `json:"pruned_total,omitempty"`
 	Success                 int64   `json:"success"`
 	Failed                  int64   `json:"failed"`
 	Active                  int64   `json:"active"`
@@ -260,25 +262,32 @@ func newOutcomeStats() OutcomeStats {
 }
 
 func (s *OutcomeStats) addSummary(item SummaryEntry) {
-	s.Total++
+	s.addSummaryCount(item, 1)
+}
+
+func (s *OutcomeStats) addSummaryCount(item SummaryEntry, count int64) {
+	if count <= 0 {
+		return
+	}
+	s.Total += count
 	status := strings.ToLower(strings.TrimSpace(item.Status))
 	switch status {
 	case "success":
-		s.Success++
+		s.Success += count
 	case "queued", "streaming":
-		s.Active++
+		s.Active += count
 	case "error", "stopped":
 		if IsFailureRateExcludedStatusCode(item.StatusCode) {
-			s.ExcludedFromFailureRate++
+			s.ExcludedFromFailureRate += count
 			return
 		}
 		if isNeutralFailureReason(item.FinishReason) {
-			s.Neutral++
+			s.Neutral += count
 			return
 		}
-		s.Failed++
+		s.Failed += count
 	default:
-		s.Neutral++
+		s.Neutral += count
 	}
 }
 

@@ -58,11 +58,15 @@ func (s *sqliteStore) Start(params StartParams) (Entry, error) {
 	if err := s.upsertEntryLocked(tx, entry); err != nil {
 		return Entry{}, err
 	}
-	if err := s.pruneLocked(tx); err != nil {
+	prunedRows, err := s.pruneLocked(tx)
+	if err != nil {
 		return Entry{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return Entry{}, fmt.Errorf("commit chat history sqlite start: %w", err)
+	}
+	if prunedRows > 0 {
+		s.compactAfterHistoryPrune(prunedRows)
 	}
 	return cloneEntry(entry), nil
 }
@@ -119,11 +123,15 @@ func (s *sqliteStore) Update(id string, params UpdateParams) (Entry, error) {
 	if err := s.upsertEntryLocked(tx, item); err != nil {
 		return Entry{}, err
 	}
-	if err := s.pruneLocked(tx); err != nil {
+	prunedRows, err := s.pruneLocked(tx)
+	if err != nil {
 		return Entry{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return Entry{}, fmt.Errorf("commit chat history sqlite update: %w", err)
+	}
+	if prunedRows > 0 {
+		s.compactAfterHistoryPrune(prunedRows)
 	}
 	return cloneEntry(item), nil
 }
@@ -151,6 +159,9 @@ func (s *sqliteStore) Clear() error {
 	return s.withWriteTx("clear", func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`DELETE FROM chat_history`); err != nil {
 			return fmt.Errorf("clear chat history sqlite rows: %w", err)
+		}
+		if err := s.clearPrunedMetricsLocked(tx); err != nil {
+			return err
 		}
 		_, err := s.nextRevisionLocked(tx)
 		return err
@@ -180,11 +191,15 @@ func (s *sqliteStore) SetLimit(limit int) (File, error) {
 	if _, err := s.nextRevisionLocked(tx); err != nil {
 		return File{}, err
 	}
-	if err := s.pruneLocked(tx); err != nil {
+	prunedRows, err := s.pruneLocked(tx)
+	if err != nil {
 		return File{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return File{}, fmt.Errorf("commit chat history sqlite set limit: %w", err)
+	}
+	if prunedRows > 0 {
+		s.compactAfterHistoryPrune(prunedRows)
 	}
 	return s.snapshotLocked()
 }

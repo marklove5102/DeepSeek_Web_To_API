@@ -158,9 +158,11 @@ func TestEnvBackedStoreWritebackBootstrapsMissingConfigFile(t *testing.T) {
 
 	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{"keys":["k1"],"accounts":[{"email":"seed@example.com","password":"p"}]}`)
 	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_PATH", path)
+	t.Setenv("DEEPSEEK_WEB_TO_API_ACCOUNTS_SQLITE_PATH", filepath.Join(filepath.Dir(path), "accounts.sqlite"))
 	t.Setenv("DEEPSEEK_WEB_TO_API_ENV_WRITEBACK", "1")
 
 	store := LoadStore()
+	defer func() { _ = store.Close() }()
 	if store.IsEnvBacked() {
 		t.Fatalf("expected writeback bootstrap to become file-backed immediately")
 	}
@@ -174,14 +176,12 @@ func TestEnvBackedStoreWritebackBootstrapsMissingConfigFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read written config: %v", err)
 	}
-	if !strings.Contains(string(content), "seed@example.com") {
-		t.Fatalf("expected bootstrapped config to contain seed account, got: %s", content)
-	}
-	if !strings.Contains(string(content), "new@example.com") {
-		t.Fatalf("expected persisted config to contain added account, got: %s", content)
+	if strings.Contains(string(content), `"accounts"`) {
+		t.Fatalf("expected accounts to be stored in sqlite instead of config json, got: %s", content)
 	}
 
 	reloaded := LoadStore()
+	defer func() { _ = reloaded.Close() }()
 	if reloaded.IsEnvBacked() {
 		t.Fatalf("expected reloaded store to prefer persisted config file")
 	}

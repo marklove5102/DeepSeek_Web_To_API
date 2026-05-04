@@ -1,6 +1,7 @@
 package chathistory
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -21,12 +22,25 @@ func (s *sqliteStore) TokenUsageStats(window time.Duration) (TokenUsageStats, er
 	if s.err != nil {
 		return TokenUsageStats{}, s.err
 	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return TokenUsageStats{}, fmt.Errorf("begin chat history sqlite token stats: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
 	stats := TokenUsageStats{
 		WindowSeconds: int64(window.Seconds()),
 		WindowByModel: map[string]TokenUsageTotals{},
 		TotalByModel:  map[string]TokenUsageTotals{},
 	}
-	rows, err := s.db.Query(`SELECT model, created_at, updated_at, completed_at, usage_json FROM chat_history`)
+	rollupTotal, rollupByModel, err := s.tokenRollupLocked(tx)
+	if err != nil {
+		return TokenUsageStats{}, err
+	}
+	stats.Total.add(rollupTotal)
+	for model, usage := range rollupByModel {
+		addModelTotals(stats.TotalByModel, model, usage)
+	}
+	rows, err := tx.Query(`SELECT model, created_at, updated_at, completed_at, usage_json FROM chat_history`)
 	if err != nil {
 		return TokenUsageStats{}, fmt.Errorf("read chat history sqlite token stats: %w", err)
 	}
@@ -69,23 +83,55 @@ func (s *sqliteStore) OutcomeStats() (OutcomeStats, error) {
 	if s.err != nil {
 		return OutcomeStats{}, s.err
 	}
-	rows, err := s.db.Query(`SELECT status, status_code, finish_reason FROM chat_history`)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return OutcomeStats{}, fmt.Errorf("begin chat history sqlite outcome stats: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	stats, err := s.outcomeRollupLocked(tx)
+	if err != nil {
+		return OutcomeStats{}, err
+	}
+	rows, err := tx.Query(`SELECT status, status_code, finish_reason FROM chat_history`)
 	if err != nil {
 		return OutcomeStats{}, fmt.Errorf("read chat history sqlite outcome stats: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	stats := newOutcomeStats()
 	for rows.Next() {
 		var item SummaryEntry
 		if err := rows.Scan(&item.Status, &item.StatusCode, &item.FinishReason); err != nil {
 			return OutcomeStats{}, fmt.Errorf("scan chat history sqlite outcome stats: %w", err)
 		}
 		stats.addSummary(item)
+		stats.RetainedTotal++
 	}
 	if err := rows.Err(); err != nil {
 		return OutcomeStats{}, fmt.Errorf("scan chat history sqlite outcome stat rows: %w", err)
 	}
 	stats.finalize()
+	return stats, nil
+}
+
+func (s *sqliteStore) outcomeRollupLocked(tx *sql.Tx) (OutcomeStats, error) {
+	stats := newOutcomeStats()
+	for _, item := range []struct {
+		key string
+		dst *int64
+	}{
+		{sqliteMetaPrunedTotal, &stats.Total},
+		{sqliteMetaPrunedSuccess, &stats.Success},
+		{sqliteMetaPrunedFailed, &stats.Failed},
+		{sqliteMetaPrunedActive, &stats.Active},
+		{sqliteMetaPrunedNeutral, &stats.Neutral},
+		{sqliteMetaPrunedExcludedRate, &stats.ExcludedFromFailureRate},
+	} {
+		value, err := s.metaInt64Locked(tx, item.key, 0)
+		if err != nil {
+			return OutcomeStats{}, err
+		}
+		*item.dst = value
+	}
+	stats.PrunedTotal = stats.Total
 	return stats, nil
 }

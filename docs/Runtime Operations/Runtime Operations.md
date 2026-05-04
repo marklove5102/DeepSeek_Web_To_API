@@ -7,6 +7,7 @@
 - [internal/account/pool_core.go](file://internal/account/pool_core.go)
 - [internal/httpapi/admin/metrics/handler.go](file://internal/httpapi/admin/metrics/handler.go)
 - [internal/responsecache/cache.go](file://internal/responsecache/cache.go)
+- [webui/src/layout/DashboardShell.jsx](file://webui/src/layout/DashboardShell.jsx)
 </cite>
 
 ## 目录
@@ -118,9 +119,14 @@ WebUI-->>Operator: charts and cards
 
 缓存统计由 `responsecache.Cache.Stats()` 暴露，管理台展示命中次数、未命中次数、内存命中、磁盘命中和不可缓存原因。
 
+### 版本检查
+
+管理台侧边栏先调用 `/admin/version` 显示当前版本，再由浏览器直接访问 GitHub API，每 30 秒检查一次最新 Release；若没有 Release，则回退到最新 tag。只有远端语义化版本大于当前版本时才提示用户，提示链接指向 GitHub Releases。该轮询发生在浏览器侧，不经过后端代理，也不会影响服务健康探针或业务 API。
+
 **章节来源**
 - [webui/src/features/overview/OverviewContainer.jsx](file://webui/src/features/overview/OverviewContainer.jsx)
 - [internal/responsecache/cache.go](file://internal/responsecache/cache.go)
+- [webui/src/layout/DashboardShell.jsx](file://webui/src/layout/DashboardShell.jsx)
 
 ## 故障排查指南
 
@@ -128,6 +134,7 @@ WebUI-->>Operator: charts and cards
 - 缓存命中下降：检查请求体是否每次变化、是否跨调用方、是否被 `Cache-Control` 绕过。
 - 账号负载一直 0：确认是否真实有 in-flight 请求；短请求结束后占用槽位会快速释放。
 - 等待队列长期增加：增大账号数量、每账号并发或全局并发，或排查账号登录失败。
+- 版本提醒不出现：先确认 `/admin/version` 返回版本号，再检查浏览器网络面板中 GitHub API 请求是否被防火墙、CORS 或限流拦截。
 
 **章节来源**
 - [internal/account/pool_core.go](file://internal/account/pool_core.go)

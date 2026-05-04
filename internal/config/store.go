@@ -10,14 +10,15 @@ import (
 )
 
 type Store struct {
-	mu      sync.RWMutex
-	cfg     Config
-	path    string
-	fromEnv bool
-	keyMap  map[string]struct{} // O(1) API key lookup index
-	accMap  map[string]int      // O(1) account lookup: identifier -> slice index
-	accTest map[string]string   // runtime-only account test status cache
-	accSess map[string]int      // runtime-only account session count cache
+	mu         sync.RWMutex
+	cfg        Config
+	path       string
+	fromEnv    bool
+	accountsDB *accountSQLiteStore
+	keyMap     map[string]struct{} // O(1) API key lookup index
+	accMap     map[string]int      // O(1) account lookup: identifier -> slice index
+	accTest    map[string]string   // runtime-only account test status cache
+	accSess    map[string]int      // runtime-only account session count cache
 }
 
 func LoadStore() *Store {
@@ -147,6 +148,11 @@ func (s *Store) UpdateAccountToken(identifier, token string) error {
 	if newID != "" {
 		s.accMap[newID] = idx
 	}
+	if s.accountsDB != nil {
+		if err := s.accountsDB.updateToken(identifier, token); err != nil {
+			return err
+		}
+	}
 	return s.saveLocked()
 }
 
@@ -154,6 +160,9 @@ func (s *Store) Replace(cfg Config) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cfg.NormalizeCredentials()
+	if err := s.persistAccountsLocked(&cfg); err != nil {
+		return err
+	}
 	s.cfg = cfg.Clone()
 	s.rebuildIndexes()
 	return s.saveLocked()
@@ -169,6 +178,9 @@ func (s *Store) Update(mutator func(*Config) error) error {
 	}
 	cfg.ReconcileCredentials(base)
 	cfg.NormalizeCredentials()
+	if err := s.persistAccountsLocked(&cfg); err != nil {
+		return err
+	}
 	s.cfg = cfg
 	s.rebuildIndexes()
 	return s.saveLocked()
@@ -183,6 +195,9 @@ func (s *Store) Save() error {
 	}
 	persistCfg := s.cfg.Clone()
 	persistCfg.ClearAccountTokens()
+	if s.accountsDB != nil {
+		persistCfg.Accounts = nil
+	}
 	b, err := json.MarshalIndent(persistCfg, "", "  ")
 	if err != nil {
 		return err
@@ -201,6 +216,9 @@ func (s *Store) saveLocked() error {
 	}
 	persistCfg := s.cfg.Clone()
 	persistCfg.ClearAccountTokens()
+	if s.accountsDB != nil {
+		persistCfg.Accounts = nil
+	}
 	b, err := json.MarshalIndent(persistCfg, "", "  ")
 	if err != nil {
 		return err
@@ -228,4 +246,23 @@ func (s *Store) ExportJSONAndBase64() (string, string, error) {
 		return "", "", err
 	}
 	return string(b), base64.StdEncoding.EncodeToString(b), nil
+}
+
+func (s *Store) persistAccountsLocked(cfg *Config) error {
+	if s == nil || s.accountsDB == nil || cfg == nil {
+		return nil
+	}
+	accounts, err := s.accountsDB.replace(cfg.Accounts)
+	if err != nil {
+		return err
+	}
+	cfg.Accounts = accounts
+	return nil
+}
+
+func (s *Store) Close() error {
+	if s == nil || s.accountsDB == nil {
+		return nil
+	}
+	return s.accountsDB.close()
 }

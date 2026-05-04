@@ -128,8 +128,8 @@ Release 构建会生成 Linux、macOS、Windows 多架构压缩包，构建 GHCR
 触发方式：
 
 ```bash
-git tag v1.0.1
-git push meow v1.0.1
+git tag v1.0.2
+git push meow v1.0.2
 ```
 
 也可以在 GitHub Actions 页面手动运行 `Release Artifacts`。手动运行时填写 `release_tag` 会使用指定 tag；不填写则读取仓库根目录 `VERSION`。
@@ -139,9 +139,14 @@ git push meow v1.0.1
 - GitHub Releases：多平台 `.tar.gz` / `.zip`、Docker image tar.gz、`sha256sums.txt`。
 - GitHub Packages：`ghcr.io/meow-calculations/deepseek-web-to-api`。
 
+### 管理台版本提醒
+
+管理台的新版本提醒依赖 GitHub Release 或 tag。发布新版本时应确保 GitHub 侧存在对应 `vX.Y.Z` release 或 tag，否则线上管理台无法检测到更高版本。只改前端轮询逻辑时不需要提升 `VERSION`；发布正式版本时才同步更新 `VERSION`、`webui/package.json` 和 release tag。
+
 **章节来源**
 - [tests/scripts/check-refactor-line-gate.sh](file://tests/scripts/check-refactor-line-gate.sh)
 - [scripts/build-release-archives.sh](file://scripts/build-release-archives.sh)
+- [webui/src/layout/DashboardShell.jsx](file://webui/src/layout/DashboardShell.jsx)
 
 ## 故障排查指南
 
