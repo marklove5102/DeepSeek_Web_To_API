@@ -1,5 +1,5 @@
 {
-  "_comment": "DeepSeek_Web_To_API 配置文件示例 - 复制为 config.json 使用",
+  "_comment": "DeepSeek_Web_To_API 结构化配置示例 - 推荐写入 .env 的 DEEPSEEK_WEB_TO_API_CONFIG_JSON；账号通过管理台文本导入并写入 SQLite",
   "_doc": "详细文档: https://github.com/Meow-Calculations/DeepSeek_Web_To_API",
   "keys": [
     "your-api-key-1",
@@ -15,26 +15,6 @@
       "key": "your-api-key-2",
       "name": "备用 API Key",
       "remark": "压测或临时调试"
-    }
-  ],
-  "accounts": [
-    {
-      "_comment": "邮箱登录方式",
-      "name": "主账号",
-      "remark": "优先用于生产流量",
-      "email": "example1@example.com",
-      "password": "your-password-1"
-    },
-    {
-      "_comment": "邮箱登录方式 - 账号2",
-      "name": "备用账号",
-      "email": "example2@example.com",
-      "password": "your-password-2"
-    },
-    {
-      "_comment": "手机号登录方式（中国大陆）",
-      "mobile": "12345678901",
-      "password": "your-password-3"
     }
   ],
   "proxies": [
@@ -89,6 +69,7 @@
   },
   "storage": {
     "data_dir": "data",
+    "accounts_sqlite_path": "data/accounts.sqlite",
     "chat_history_path": "data/chat_history.json",
     "chat_history_sqlite_path": "data/chat_history.sqlite",
     "raw_stream_sample_root": "tests/raw_stream_samples"

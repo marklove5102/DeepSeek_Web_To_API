@@ -111,7 +111,8 @@ func (s *sqliteStore) init() error {
 		_ = tx.Rollback()
 		return err
 	}
-	if err := s.pruneLocked(tx); err != nil {
+	prunedRows, err := s.pruneLocked(tx)
+	if err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -124,6 +125,8 @@ func (s *sqliteStore) init() error {
 	}
 	if compressedRows > 0 {
 		s.vacuumAfterDetailCompression(compressedRows)
+	} else if prunedRows > 0 {
+		s.compactAfterHistoryPrune(prunedRows)
 	}
 	return nil
 }

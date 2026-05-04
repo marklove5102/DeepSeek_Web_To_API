@@ -1,30 +1,21 @@
 import { useState } from 'react'
-import { FileCode, Download, Upload, Copy, Check, AlertTriangle } from 'lucide-react'
+import { Download, Upload, Copy, Check, AlertTriangle, ListPlus } from 'lucide-react'
 import clsx from 'clsx'
 import { useI18n } from '../i18n'
-import { getBatchImportTemplates } from '../utils/batchImportTemplates'
 
 export default function BatchImport({ onRefresh, onMessage, authFetch }) {
     const { t } = useI18n()
-    const [jsonInput, setJsonInput] = useState('')
+    const [accountInput, setAccountInput] = useState('')
     const [loading, setLoading] = useState(false)
     const [result, setResult] = useState(null)
     const [copied, setCopied] = useState(false)
 
     const apiFetch = authFetch || fetch
-    const templates = getBatchImportTemplates(t)
 
     const handleImport = async () => {
-        if (!jsonInput.trim()) {
-            onMessage('error', t('batchImport.enterJson'))
-            return
-        }
-
-        let config
-        try {
-            config = JSON.parse(jsonInput)
-        } catch (e) {
-            onMessage('error', t('messages.invalidJson'))
+        const raw = accountInput.trim()
+        if (!raw) {
+            onMessage('error', t('batchImport.enterAccountsText'))
             return
         }
 
@@ -34,7 +25,7 @@ export default function BatchImport({ onRefresh, onMessage, authFetch }) {
             const res = await apiFetch('/admin/import', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(config),
+                body: JSON.stringify({ accounts_text: raw }),
             })
             const data = await res.json()
             if (res.ok) {
@@ -51,21 +42,17 @@ export default function BatchImport({ onRefresh, onMessage, authFetch }) {
         }
     }
 
-    const loadTemplate = (key) => {
-        const tpl = templates[key]
-        if (tpl) {
-            setJsonInput(JSON.stringify(tpl.config, null, 2))
-            onMessage('info', t('batchImport.templateLoaded', { name: tpl.name }))
-        }
-    }
-
     const handleExport = async () => {
         try {
             const res = await apiFetch('/admin/export')
             if (res.ok) {
                 const data = await res.json()
-                setJsonInput(JSON.stringify(JSON.parse(data.json), null, 2))
-                onMessage('success', t('batchImport.currentConfigLoaded'))
+                const cfg = JSON.parse(data.json)
+                const lines = (cfg.accounts || [])
+                    .map(acc => `${acc.email || acc.mobile || ''}:${acc.password || ''}`)
+                    .filter(line => !line.startsWith(':') && !line.endsWith(':'))
+                setAccountInput(lines.join('\n'))
+                onMessage('success', t('batchImport.currentAccountsLoaded'))
             }
         } catch (e) {
             onMessage('error', t('batchImport.fetchConfigFailed'))
@@ -89,24 +76,19 @@ export default function BatchImport({ onRefresh, onMessage, authFetch }) {
 
     return (
         <div className="flex flex-col lg:grid lg:grid-cols-3 gap-6 lg:h-[calc(100vh-140px)]">
-            {/* Templates Panel */}
             <div className="md:col-span-1 space-y-4">
                 <div className="ops-panel p-5">
                     <h3 className="font-semibold flex items-center gap-2 mb-4">
-                        <FileCode className="w-4 h-4 text-primary" />
-                        {t('batchImport.quickTemplates')}
+                        <ListPlus className="w-4 h-4 text-primary" />
+                        {t('batchImport.plainAccountsTitle')}
                     </h3>
-                    <div className="space-y-3">
-                        {Object.entries(templates).map(([key, tpl]) => (
-                            <button
-                                key={key}
-                                onClick={() => loadTemplate(key)}
-                                className="w-full text-left p-3 rounded-lg border border-border bg-slate-50 hover:bg-blue-50 hover:border-blue-200 transition-all custom-focus group"
-                            >
-                                <div className="font-medium text-sm group-hover:text-primary transition-colors">{tpl.name}</div>
-                                <div className="text-xs text-muted-foreground mt-0.5">{tpl.desc}</div>
-                            </button>
-                        ))}
+                    <div className="rounded-lg border border-blue-100 bg-blue-50/70 p-3 text-xs leading-6 text-slate-700">
+                        <div className="font-black text-blue-700">{t('batchImport.plainAccountsFormat')}</div>
+                        <code className="mt-2 block rounded-md border border-blue-100 bg-white px-2 py-1 text-[11px] text-slate-700">
+                            user@example.com:password123<br />
+                            13800000000:password123
+                        </code>
+                        <p className="mt-2">{t('batchImport.plainAccountsDesc')}</p>
                     </div>
                 </div>
 
@@ -131,19 +113,18 @@ export default function BatchImport({ onRefresh, onMessage, authFetch }) {
                 </div>
             </div>
 
-            {/* Editor Panel */}
             <div className="lg:col-span-2 flex flex-col ops-panel overflow-hidden min-h-[400px] lg:h-full">
                 <div className="p-4 border-b border-border flex items-center justify-between bg-slate-50">
                     <h3 className="font-semibold flex items-center gap-2">
                         <Upload className="w-4 h-4 text-primary" />
-                        {t('batchImport.jsonEditor')}
+                        {t('batchImport.accountsEditor')}
                     </h3>
                     <div className="flex gap-2">
                         <button onClick={handleExport} className="btn btn-secondary btn-sm">
-                            {t('batchImport.loadCurrentConfig')}
+                            {t('batchImport.loadCurrentAccounts')}
                         </button>
                         <button onClick={handleImport} disabled={loading} className="btn btn-primary btn-sm">
-                            {loading ? t('batchImport.importing') : t('batchImport.applyConfig')}
+                            {loading ? t('batchImport.importing') : t('batchImport.applyAccounts')}
                         </button>
                     </div>
                 </div>
@@ -151,9 +132,9 @@ export default function BatchImport({ onRefresh, onMessage, authFetch }) {
                 <div className="flex-1 relative min-h-[400px]">
                     <textarea
                         className="absolute inset-0 w-full h-full p-4 font-mono text-sm bg-card text-foreground resize-none focus:outline-none custom-scrollbar"
-                        value={jsonInput}
-                        onChange={e => setJsonInput(e.target.value)}
-                        placeholder={'{\n  "keys": ["your-api-key"],\n  "accounts": [\n    {"email": "...", "password": "...", "token": ""}\n  ]\n}'}
+                        value={accountInput}
+                        onChange={e => setAccountInput(e.target.value)}
+                        placeholder={'user@example.com:password123\n13800000000:password123'}
                         spellCheck={false}
                     />
                 </div>

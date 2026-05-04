@@ -3,6 +3,7 @@
 <cite>
 **本文档引用的文件**
 - [AGENTS.md](file://AGENTS.md)
+- [.github/workflows/codeql.yml](file://.github/workflows/codeql.yml)
 - [.github/workflows/quality-gates.yml](file://.github/workflows/quality-gates.yml)
 - [scripts/lint.sh](file://scripts/lint.sh)
 - [tests/scripts/run-unit-all.sh](file://tests/scripts/run-unit-all.sh)
@@ -23,6 +24,7 @@
 ## 简介
 
 本项目的交付门禁由仓库 `AGENTS.md` 和 GitHub Actions 共同定义。代码修改应运行 lint、重构行数门禁、Go/Node 单测和 WebUI 构建。文档修改至少需要 Markdown diff 检查和旧项目残留扫描。
+GitHub `main` 分支启用 Code Scanning 规则，PR 必须跑完 CodeQL 扫描并上传结果后才允许合并。
 
 **章节来源**
 - [AGENTS.md](file://AGENTS.md)
@@ -40,6 +42,7 @@ WEB["npm run build --prefix webui"]
 end
 subgraph "CI"
 QG["quality-gates.yml"]
+CODEQL["codeql.yml"]
 REL["release-artifacts.yml"]
 end
 subgraph "Tests"
@@ -52,12 +55,14 @@ LINE --> QG
 UNIT --> GO
 UNIT --> NODE
 WEB --> QG
+QG --> CODEQL
 RAW --> NODE
-QG --> REL
+CODEQL --> REL
 ```
 
 **图表来源**
 - [.github/workflows/quality-gates.yml](file://.github/workflows/quality-gates.yml)
+- [.github/workflows/codeql.yml](file://.github/workflows/codeql.yml)
 - [tests/scripts/run-unit-all.sh](file://tests/scripts/run-unit-all.sh)
 
 **章节来源**
@@ -71,11 +76,13 @@ QG --> REL
 - `run-unit-all.sh`：串行运行 Go 单元测试和 Node 测试。
 - `npm run build --prefix webui`：验证管理台可生产构建。
 - `quality-gates.yml`：在 push/PR 上运行 lint、单测、WebUI build 和跨平台构建。
+- `codeql.yml`：在 PR、`main` / `dev` / `codex/**` push 和每周计划任务上运行 Go 与 JavaScript/TypeScript CodeQL 分析，并上传 Code Scanning 结果。
 - `release-artifacts.yml`：推送版本 tag、发布 GitHub Release 或手动触发时，构建压缩包、Docker 镜像和 checksum。
 - CI 内的多平台 Go 构建默认串行执行，避免 `modernc.org/sqlite` 等较重依赖在 GitHub hosted runner 上并发编译导致内存压力和 `xargs` 123 汇总失败。
 
 **章节来源**
 - [scripts/lint.sh](file://scripts/lint.sh)
+- [.github/workflows/codeql.yml](file://.github/workflows/codeql.yml)
 - [.github/workflows/release-artifacts.yml](file://.github/workflows/release-artifacts.yml)
 
 ## 架构总览
@@ -90,6 +97,7 @@ Dev->>Local: run lint/unit/build gates
 Local-->>Dev: pass/fail
 Dev->>CI: push or PR
 CI->>CI: quality gates
+CI->>CI: CodeQL code scanning
 alt release
 CI->>Release: build archives and Docker images
 Release-->>Dev: tar.gz zip sha256sums image tags
@@ -98,6 +106,7 @@ end
 
 **图表来源**
 - [.github/workflows/quality-gates.yml](file://.github/workflows/quality-gates.yml)
+- [.github/workflows/codeql.yml](file://.github/workflows/codeql.yml)
 - [.github/workflows/release-artifacts.yml](file://.github/workflows/release-artifacts.yml)
 
 **章节来源**
@@ -128,8 +137,8 @@ Release 构建会生成 Linux、macOS、Windows 多架构压缩包，构建 GHCR
 触发方式：
 
 ```bash
-git tag v1.0.1
-git push meow v1.0.1
+git tag v1.0.2
+git push meow v1.0.2
 ```
 
 也可以在 GitHub Actions 页面手动运行 `Release Artifacts`。手动运行时填写 `release_tag` 会使用指定 tag；不填写则读取仓库根目录 `VERSION`。
@@ -139,19 +148,31 @@ git push meow v1.0.1
 - GitHub Releases：多平台 `.tar.gz` / `.zip`、Docker image tar.gz、`sha256sums.txt`。
 - GitHub Packages：`ghcr.io/meow-calculations/deepseek-web-to-api`。
 
+### Code Scanning
+
+`main` 分支的仓库规则要求 Code Scanning 结果。提交到 PR 分支后，`codeql.yml` 会分别分析 Go 和 JavaScript/TypeScript；两项扫描完成并上传结果后，GitHub 才能判定该提交满足 `main` 的安全门禁。若仓库规则提示 “Waiting for Code Scanning results”，先确认 CodeQL workflow 是否已启动，且 `security-events: write` 权限没有被仓库设置禁用。
+
+### 管理台版本提醒
+
+管理台的新版本提醒依赖 GitHub Release 或 tag。发布新版本时应确保 GitHub 侧存在对应 `vX.Y.Z` release 或 tag，否则线上管理台无法检测到更高版本。只改前端轮询逻辑时不需要提升 `VERSION`；发布正式版本时才同步更新 `VERSION`、`webui/package.json` 和 release tag。
+
 **章节来源**
 - [tests/scripts/check-refactor-line-gate.sh](file://tests/scripts/check-refactor-line-gate.sh)
+- [.github/workflows/codeql.yml](file://.github/workflows/codeql.yml)
 - [scripts/build-release-archives.sh](file://scripts/build-release-archives.sh)
+- [webui/src/layout/DashboardShell.jsx](file://webui/src/layout/DashboardShell.jsx)
 
 ## 故障排查指南
 
 - lint 下载失败：检查网络或手动设置 `GOLANGCI_LINT_BIN`。
 - Node 测试失败：先运行 `npm ci --prefix webui`，再执行 Node 测试脚本。
 - WebUI 构建失败：检查 Node 版本是否满足 CI 的 Node 24。
+- Code Scanning 一直等待：检查 `CodeQL` workflow 是否在 PR 分支运行，仓库 Actions 设置是否允许 `security-events: write`，以及 CodeQL 两个语言矩阵是否都完成。
 - 跨平台构建失败：确认 Go 版本为 1.26.x，且没有 CGO 依赖。
 
 **章节来源**
 - [.github/workflows/quality-gates.yml](file://.github/workflows/quality-gates.yml)
+- [.github/workflows/codeql.yml](file://.github/workflows/codeql.yml)
 - [Dockerfile](file://Dockerfile)
 
 ## 结论

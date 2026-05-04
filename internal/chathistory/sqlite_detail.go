@@ -180,3 +180,21 @@ func (s *sqliteStore) vacuumAfterDetailCompression(rows int) {
 	}
 	config.Logger.Info("[chat_history] SQLite compact after detail compression completed", "path", s.path)
 }
+
+func (s *sqliteStore) compactAfterHistoryPrune(rows int) {
+	if s == nil || s.db == nil || rows <= 0 {
+		return
+	}
+	config.Logger.Info("[chat_history] pruned SQLite history rows", "path", s.path, "rows", rows, "retained", BurstPruneRetainedLimit)
+	for _, stmt := range []string{
+		"PRAGMA wal_checkpoint(TRUNCATE)",
+		"VACUUM",
+		"PRAGMA wal_checkpoint(TRUNCATE)",
+	} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			config.Logger.Warn("[chat_history] SQLite compact after history prune failed", "path", s.path, "statement", stmt, "error", err)
+			return
+		}
+	}
+	config.Logger.Info("[chat_history] SQLite compact after history prune completed", "path", s.path)
+}

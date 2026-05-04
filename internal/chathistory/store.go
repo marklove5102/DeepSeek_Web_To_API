@@ -18,11 +18,12 @@ import (
 )
 
 const (
-	FileVersion      = 2
-	DisabledLimit    = 0
-	DefaultLimit     = 20_000
-	MaxLimit         = 20_000
-	defaultPreviewAt = 160
+	FileVersion             = 2
+	DisabledLimit           = 0
+	DefaultLimit            = 20_000
+	MaxLimit                = 20_000
+	BurstPruneRetainedLimit = 500
+	defaultPreviewAt        = 160
 )
 
 var allowedLimits = map[int]struct{}{
@@ -876,12 +877,13 @@ func (s *Store) normalizeIndexLocked() {
 		}
 		return summaries[i].UpdatedAt > summaries[j].UpdatedAt
 	})
-	if s.state.Limit != DisabledLimit && len(summaries) > s.state.Limit {
-		for _, item := range summaries[s.state.Limit:] {
+	retain := retainedHistoryCountAfterPrune(len(summaries), s.state.Limit)
+	if retain >= 0 && len(summaries) > retain {
+		for _, item := range summaries[retain:] {
 			s.markDetailDeletedLocked(item.ID)
 			delete(s.details, item.ID)
 		}
-		summaries = summaries[:s.state.Limit]
+		summaries = summaries[:retain]
 	}
 	s.state.Items = summaries
 }
@@ -1016,6 +1018,22 @@ func isSafeDetailID(id string) bool {
 func isAllowedLimit(limit int) bool {
 	_, ok := allowedLimits[limit]
 	return ok
+}
+
+func retainedHistoryCountAfterPrune(total, limit int) int {
+	if limit == DisabledLimit {
+		return -1
+	}
+	if !isAllowedLimit(limit) {
+		limit = DefaultLimit
+	}
+	if limit == MaxLimit {
+		if total >= MaxLimit {
+			return BurstPruneRetainedLimit
+		}
+		return MaxLimit
+	}
+	return limit
 }
 
 func (s *Store) markDetailDirtyLocked(id string) {

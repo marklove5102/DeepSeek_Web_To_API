@@ -3,6 +3,7 @@ package chathistory
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -184,6 +185,63 @@ func TestSQLiteStoreMigratesLegacyUncompressedDetails(t *testing.T) {
 	assertSQLiteDetailCompressed(t, store, legacyEntry.ID)
 }
 
+func TestSQLiteStoreBurstPrunesAtMaxLimitAndKeepsCumulativeStats(t *testing.T) {
+	dir := t.TempDir()
+	store := NewSQLite(filepath.Join(dir, "chat_history.sqlite"), filepath.Join(dir, "missing.json"))
+	defer func() { _ = store.Close() }()
+	if err := store.Err(); err != nil {
+		t.Fatalf("open sqlite store: %v", err)
+	}
+	seedSQLiteHistoryRows(t, store.sqlite.db, MaxLimit-1)
+
+	entry, err := store.Start(StartParams{Model: "deepseek-v4-pro", UserInput: "threshold"})
+	if err != nil {
+		t.Fatalf("start threshold row: %v", err)
+	}
+	_, retained, err := store.SnapshotPage(0, 1000)
+	if err != nil {
+		t.Fatalf("snapshot page: %v", err)
+	}
+	if retained != BurstPruneRetainedLimit {
+		t.Fatalf("expected retained rows %d, got %d", BurstPruneRetainedLimit, retained)
+	}
+	if _, err := store.Get(entry.ID); err != nil {
+		t.Fatalf("expected newest entry to be retained: %v", err)
+	}
+	if _, err := store.Get("seed_000001"); err == nil {
+		t.Fatal("expected oldest entry to be pruned")
+	}
+
+	outcome, err := store.OutcomeStats()
+	if err != nil {
+		t.Fatalf("outcome stats: %v", err)
+	}
+	if outcome.Total != MaxLimit || outcome.RetainedTotal != BurstPruneRetainedLimit || outcome.PrunedTotal != MaxLimit-BurstPruneRetainedLimit {
+		t.Fatalf("unexpected cumulative outcome totals: %#v", outcome)
+	}
+	if outcome.Success != MaxLimit-1 || outcome.Active != 1 {
+		t.Fatalf("unexpected cumulative status counts: %#v", outcome)
+	}
+	tokens, err := store.TokenUsageStats(0)
+	if err != nil {
+		t.Fatalf("token stats: %v", err)
+	}
+	if tokens.Total.Requests != MaxLimit-1 || tokens.Total.TotalTokens != MaxLimit-1 {
+		t.Fatalf("unexpected cumulative token totals: %#v", tokens.Total)
+	}
+
+	if err := store.Clear(); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	outcome, err = store.OutcomeStats()
+	if err != nil {
+		t.Fatalf("outcome stats after clear: %v", err)
+	}
+	if outcome.Total != 0 || outcome.PrunedTotal != 0 || outcome.RetainedTotal != 0 {
+		t.Fatalf("expected clear to reset cumulative outcome stats, got %#v", outcome)
+	}
+}
+
 func TestSQLiteDetailRejectsOversizedInflatedBlob(t *testing.T) {
 	previous := sqliteDetailMaxInflatedBytes
 	sqliteDetailMaxInflatedBytes = 64
@@ -309,5 +367,34 @@ func createLegacySQLiteHistory(t *testing.T, dbPath string, entry Entry) {
 		string(detailJSON),
 	); err != nil {
 		t.Fatalf("insert legacy history row: %v", err)
+	}
+}
+
+func seedSQLiteHistoryRows(t *testing.T, db *sql.DB, count int) {
+	t.Helper()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin seed sqlite history: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.Prepare(
+		`INSERT INTO chat_history (
+			id, revision, created_at, updated_at, completed_at, status, model,
+			user_input, preview, status_code, detail_revision, usage_json
+		) VALUES (?, ?, ?, ?, ?, 'success', 'deepseek-v4-pro', ?, 'seed', 200, ?, ?)`,
+	)
+	if err != nil {
+		t.Fatalf("prepare seed sqlite history: %v", err)
+	}
+	defer func() { _ = stmt.Close() }()
+	for i := 1; i <= count; i++ {
+		id := fmt.Sprintf("seed_%06d", i)
+		usageJSON := `{"input_tokens":1,"total_tokens":1}`
+		if _, err := stmt.Exec(id, i, i, i, i, id, i, usageJSON); err != nil {
+			t.Fatalf("insert seed sqlite history %d: %v", i, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit seed sqlite history: %v", err)
 	}
 }

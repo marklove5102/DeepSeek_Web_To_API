@@ -110,7 +110,7 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
 
     const addKey = async () => {
         const isEditing = Boolean(editingKey?.key)
-        if (!isEditing && !newKey.key.trim()) {
+        if (!newKey.key.trim()) {
             return
         }
         setLoading(true)
@@ -120,9 +120,9 @@ export function useAccountActions({ apiFetch, t, onMessage, onRefresh, config, t
                 : '/admin/keys'
             const method = isEditing ? 'PUT' : 'POST'
             const payload = isEditing
-                ? { name: newKey.name, remark: newKey.remark }
+                ? { key: newKey.key.trim(), name: newKey.name, remark: newKey.remark }
                 : { key: newKey.key.trim(), name: newKey.name, remark: newKey.remark }
-            if (!isEditing && !payload.key) {
+            if (!payload.key) {
                 return
             }
             const res = await apiFetch(endpoint, {

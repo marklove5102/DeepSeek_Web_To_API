@@ -2,6 +2,8 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react
 import { useLocation, useNavigate } from 'react-router-dom'
 import {
     Activity,
+    BellRing,
+    ExternalLink,
     Gauge,
     Globe,
     History,
@@ -32,6 +34,63 @@ const BatchImport = lazy(() => import('../components/BatchImport'))
 const SettingsContainer = lazy(() => import('../features/settings/SettingsContainer'))
 const ProxyManagerContainer = lazy(() => import('../features/proxy/ProxyManagerContainer'))
 
+const GITHUB_RELEASE_API = 'https://api.github.com/repos/Meow-Calculations/DeepSeek_Web_To_API/releases/latest'
+const GITHUB_TAGS_API = 'https://api.github.com/repos/Meow-Calculations/DeepSeek_Web_To_API/tags?per_page=1'
+const GITHUB_RELEASES_URL = 'https://github.com/Meow-Calculations/DeepSeek_Web_To_API/releases'
+const VERSION_CHECK_INTERVAL_MS = 30_000
+const VERSION_NOTIFY_STORAGE_KEY = 'deepseek-web-to-api_notified_update_tag'
+
+const normalizeVersionTag = (value) => String(value || '').trim().replace(/^v/i, '')
+
+const parseSemver = (value) => {
+    const normalized = normalizeVersionTag(value)
+    const match = normalized.match(/^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/)
+    if (!match) return null
+    return match.slice(1, 4).map(part => Number.parseInt(part, 10))
+}
+
+const compareSemver = (left, right) => {
+    const a = parseSemver(left)
+    const b = parseSemver(right)
+    if (!a || !b) return 0
+    for (let i = 0; i < 3; i += 1) {
+        if (a[i] > b[i]) return 1
+        if (a[i] < b[i]) return -1
+    }
+    return 0
+}
+
+const getLatestGitHubVersion = async (signal) => {
+    const releaseRes = await fetch(GITHUB_RELEASE_API, {
+        signal,
+        headers: { Accept: 'application/vnd.github+json' },
+    })
+    if (releaseRes.ok) {
+        const release = await releaseRes.json()
+        return {
+            tag: release.tag_name || release.name,
+            url: release.html_url || GITHUB_RELEASES_URL,
+        }
+    }
+    if (releaseRes.status !== 404) {
+        throw new Error(`GitHub release check failed: ${releaseRes.status}`)
+    }
+
+    const tagsRes = await fetch(GITHUB_TAGS_API, {
+        signal,
+        headers: { Accept: 'application/vnd.github+json' },
+    })
+    if (!tagsRes.ok) {
+        throw new Error(`GitHub tag check failed: ${tagsRes.status}`)
+    }
+    const tags = await tagsRes.json()
+    const latestTag = Array.isArray(tags) ? tags[0] : null
+    return {
+        tag: latestTag?.name,
+        url: latestTag?.name ? `${GITHUB_RELEASES_URL}/tag/${latestTag.name}` : GITHUB_RELEASES_URL,
+    }
+}
+
 function TabLoadingFallback({ label }) {
     return (
         <div className="ops-panel min-h-[360px] flex items-center justify-center">
@@ -47,12 +106,13 @@ function TabLoadingFallback({ label }) {
     )
 }
 
-export default function DashboardShell({ token, onLogout, config, fetchConfig, showMessage, message, onForceLogout }) {
+export default function DashboardShell({ onLogout, authFetch, config, fetchConfig, showMessage, message, onForceLogout }) {
     const { t } = useI18n()
     const location = useLocation()
     const navigate = useNavigate()
     const [sidebarOpen, setSidebarOpen] = useState(false)
     const [versionInfo, setVersionInfo] = useState(null)
+    const [availableUpdate, setAvailableUpdate] = useState(null)
 
     const navItems = [
         { id: 'overview', label: t('nav.overview.label'), icon: LayoutDashboard, description: t('nav.overview.desc') },
@@ -93,20 +153,6 @@ export default function DashboardShell({ token, onLogout, config, fetchConfig, s
         setSidebarOpen(false)
     }, [adminBasePath, navigate])
 
-    const authFetch = useCallback(async (url, options = {}) => {
-        const headers = {
-            ...options.headers,
-            Authorization: `Bearer ${token}`,
-        }
-        const res = await fetch(url, { ...options, headers })
-
-        if (res.status === 401) {
-            onLogout()
-            throw new Error(t('auth.expired'))
-        }
-        return res
-    }, [onLogout, t, token])
-
     useEffect(() => {
         let disposed = false
         async function loadVersion() {
@@ -127,6 +173,51 @@ export default function DashboardShell({ token, onLogout, config, fetchConfig, s
             disposed = true
         }
     }, [authFetch])
+
+    useEffect(() => {
+        const currentVersion = versionInfo?.current_version || versionInfo?.current_tag
+        if (!currentVersion) return undefined
+
+        let disposed = false
+        let activeController = null
+
+        async function checkGitHubVersion() {
+            if (activeController) {
+                activeController.abort()
+            }
+            activeController = new AbortController()
+            try {
+                const latest = await getLatestGitHubVersion(activeController.signal)
+                if (disposed || !latest?.tag) return
+
+                const isNewer = compareSemver(latest.tag, currentVersion) > 0
+                if (!isNewer) {
+                    setAvailableUpdate(null)
+                    return
+                }
+
+                setAvailableUpdate(latest)
+                const notifiedTag = sessionStorage.getItem(VERSION_NOTIFY_STORAGE_KEY)
+                if (notifiedTag !== latest.tag) {
+                    sessionStorage.setItem(VERSION_NOTIFY_STORAGE_KEY, latest.tag)
+                    showMessage('success', t('sidebar.updateAvailableToast', { version: latest.tag }))
+                }
+            } catch (_err) {
+                // Keep the last positive result visible if GitHub is rate-limited
+                // or briefly unreachable; the next successful poll will correct it.
+            }
+        }
+
+        checkGitHubVersion()
+        const timer = window.setInterval(checkGitHubVersion, VERSION_CHECK_INTERVAL_MS)
+        return () => {
+            disposed = true
+            window.clearInterval(timer)
+            if (activeController) {
+                activeController.abort()
+            }
+        }
+    }, [showMessage, t, versionInfo?.current_tag, versionInfo?.current_version])
 
     const renderTab = () => {
         switch (activeTab) {
@@ -225,6 +316,24 @@ export default function DashboardShell({ token, onLogout, config, fetchConfig, s
                             <span>{t('sidebar.version')}</span>
                             <span className="font-mono text-foreground">{versionInfo?.current_tag || '-'}</span>
                         </div>
+                        {availableUpdate && (
+                            <a
+                                className="version-update-link mt-3"
+                                href={availableUpdate.url || GITHUB_RELEASES_URL}
+                                target="_blank"
+                                rel="noreferrer"
+                                aria-live="polite"
+                            >
+                                <span className="version-update-icon">
+                                    <BellRing className="w-3.5 h-3.5" />
+                                </span>
+                                <span className="min-w-0 flex-1">
+                                    <span className="block text-[11px] font-black leading-tight">{t('sidebar.updateAvailable')}</span>
+                                    <span className="block mt-0.5 truncate font-mono text-[10px] opacity-80">{availableUpdate.tag}</span>
+                                </span>
+                                <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                            </a>
+                        )}
                     </div>
                     <div className="mt-3 flex items-center gap-2">
                         <LanguageToggle />

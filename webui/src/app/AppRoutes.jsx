@@ -1,3 +1,4 @@
+import { useCallback } from 'react'
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import clsx from 'clsx'
 
@@ -22,12 +23,35 @@ export default function AppRoutes() {
         showMessage,
         handleLogin,
         handleLogout,
+        handleAuthExpired,
     } = useAdminAuth({ isProduction, location, t })
+
+    const authFetch = useCallback(async (url, options = {}) => {
+        if (!token) {
+            handleAuthExpired()
+            const error = new Error(t('auth.expired'))
+            error.authExpired = true
+            throw error
+        }
+
+        const headers = new Headers(options.headers || {})
+        headers.set('Authorization', `Bearer ${token}`)
+        const res = await fetch(url, { ...options, headers })
+
+        if (res.status === 401 || res.status === 403) {
+            handleAuthExpired()
+            const error = new Error(t('auth.expired'))
+            error.authExpired = true
+            throw error
+        }
+
+        return res
+    }, [handleAuthExpired, t, token])
 
     const {
         config,
         fetchConfig,
-    } = useAdminConfig({ token, showMessage, t })
+    } = useAdminConfig({ token, authFetch, showMessage, t })
 
     if (isAdminRoute && authChecking) {
         return (
@@ -48,8 +72,8 @@ export default function AppRoutes() {
             <Route path={isProduction ? "/*" : "/admin/*"} element={
                 token ? (
                     <DashboardShell
-                        token={token}
                         onLogout={handleLogout}
+                        authFetch={authFetch}
                         config={config}
                         fetchConfig={fetchConfig}
                         showMessage={showMessage}

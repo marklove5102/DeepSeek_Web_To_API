@@ -10,12 +10,23 @@ import (
 const overviewWindow = time.Minute
 const maxInt64StatUint = uint64(1<<63 - 1)
 
+var tokenUsageWindows = []struct {
+	key    string
+	window time.Duration
+}{
+	{key: "24h", window: 24 * time.Hour},
+	{key: "7d", window: 7 * 24 * time.Hour},
+	{key: "15d", window: 15 * 24 * time.Hour},
+	{key: "30d", window: 30 * 24 * time.Hour},
+}
+
 type overviewMetricsResponse struct {
 	Success       bool                        `json:"success"`
 	CollectedAt   int64                       `json:"collected_at"`
 	WindowSeconds int64                       `json:"window_seconds"`
 	Throughput    overviewThroughput          `json:"throughput"`
 	Tokens        chathistory.TokenUsageStats `json:"tokens"`
+	TokenWindows  map[string]tokenWindowStats `json:"token_windows"`
 	Cost          costBreakdown               `json:"cost"`
 	Host          hostSnapshot                `json:"host"`
 	Cache         overviewCacheStats          `json:"cache"`
@@ -28,6 +39,13 @@ type overviewThroughput struct {
 	RequestsInWindow int64   `json:"requests_in_window"`
 	TokensPerSecond  float64 `json:"tokens_per_second"`
 	TokensInWindow   int64   `json:"tokens_in_window"`
+}
+
+type tokenWindowStats struct {
+	Label         string                                  `json:"label"`
+	WindowSeconds int64                                   `json:"window_seconds"`
+	Totals        chathistory.TokenUsageTotals            `json:"totals"`
+	ByModel       map[string]chathistory.TokenUsageTotals `json:"by_model"`
 }
 
 type overviewCacheStats struct {
@@ -60,6 +78,8 @@ type overviewCacheStats struct {
 
 type overviewHistoryStats struct {
 	Total                   int64   `json:"total"`
+	RetainedTotal           int64   `json:"retained_total"`
+	PrunedTotal             int64   `json:"pruned_total"`
 	Limit                   int     `json:"limit"`
 	Success                 int64   `json:"success"`
 	Failed                  int64   `json:"failed"`
@@ -96,16 +116,44 @@ func (h *Handler) getOverviewMetrics(w http.ResponseWriter, _ *http.Request) {
 			TokensPerSecond:  round2(float64(stats.Window.TotalTokens) / windowSeconds),
 			TokensInWindow:   stats.Window.TotalTokens,
 		},
-		Tokens:  stats,
-		Cost:    buildCostBreakdown(stats, now),
-		Host:    collectHostSnapshot(now),
-		Cache:   h.cacheStats(),
-		History: h.historyStats(),
+		Tokens:       stats,
+		TokenWindows: h.tokenWindowStats(),
+		Cost:         buildCostBreakdown(stats, now),
+		Host:         collectHostSnapshot(now),
+		Cache:        h.cacheStats(),
+		History:      h.historyStats(),
 	}
 	if h.Pool != nil {
 		resp.Pool = h.Pool.Status()
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) tokenWindowStats() map[string]tokenWindowStats {
+	out := make(map[string]tokenWindowStats, len(tokenUsageWindows))
+	for _, item := range tokenUsageWindows {
+		out[item.key] = tokenWindowStats{
+			Label:         item.key,
+			WindowSeconds: int64(item.window.Seconds()),
+			ByModel:       map[string]chathistory.TokenUsageTotals{},
+		}
+	}
+	if h.ChatHistory == nil {
+		return out
+	}
+	for _, item := range tokenUsageWindows {
+		stats, err := h.ChatHistory.TokenUsageStats(item.window)
+		if err != nil {
+			continue
+		}
+		out[item.key] = tokenWindowStats{
+			Label:         item.key,
+			WindowSeconds: stats.WindowSeconds,
+			Totals:        stats.Window,
+			ByModel:       stats.WindowByModel,
+		}
+	}
+	return out
 }
 
 func (h *Handler) tokenUsageStats() (chathistory.TokenUsageStats, error) {
@@ -140,11 +188,15 @@ func (h *Handler) historyStats() overviewHistoryStats {
 			ExcludedStatusCodes: append([]int(nil), chathistory.FailureRateExcludedStatusCodes...),
 		}
 	}
-	if total <= 0 && outcome.Total > 0 {
-		total = int(outcome.Total)
+	retainedTotal := int64(total)
+	cumulativeTotal := outcome.Total
+	if cumulativeTotal < retainedTotal {
+		cumulativeTotal = retainedTotal
 	}
 	return overviewHistoryStats{
-		Total:                   int64(total),
+		Total:                   cumulativeTotal,
+		RetainedTotal:           retainedTotal,
+		PrunedTotal:             outcome.PrunedTotal,
 		Limit:                   snapshot.Limit,
 		Success:                 outcome.Success,
 		Failed:                  outcome.Failed,

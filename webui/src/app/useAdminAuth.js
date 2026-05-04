@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 export function useAdminAuth({ isProduction, location, t }) {
     const [message, setMessage] = useState(null)
     const [token, setToken] = useState(null)
     const [authChecking, setAuthChecking] = useState(true)
+    const authExpiredNotifiedRef = useRef(false)
 
     const isAdminRoute = location.pathname.startsWith('/admin') || isProduction
 
@@ -13,14 +14,26 @@ export function useAdminAuth({ isProduction, location, t }) {
     }, [])
 
     const handleLogout = useCallback(() => {
+        authExpiredNotifiedRef.current = false
         setToken(null)
         sessionStorage.removeItem('deepseek-web-to-api_token')
         sessionStorage.removeItem('deepseek-web-to-api_token_expires')
     }, [])
 
     const handleLogin = useCallback((newToken) => {
+        authExpiredNotifiedRef.current = false
         setToken(newToken)
     }, [])
+
+    const handleAuthExpired = useCallback(() => {
+        setToken(null)
+        sessionStorage.removeItem('deepseek-web-to-api_token')
+        sessionStorage.removeItem('deepseek-web-to-api_token_expires')
+        if (!authExpiredNotifiedRef.current) {
+            authExpiredNotifiedRef.current = true
+            showMessage('error', t('auth.expired'))
+        }
+    }, [showMessage, t])
 
     useEffect(() => {
         if (!isAdminRoute) {
@@ -40,7 +53,7 @@ export function useAdminAuth({ isProduction, location, t }) {
                     if (res.ok) {
                         setToken(storedToken)
                     } else {
-                        handleLogout()
+                        handleAuthExpired()
                     }
                 } catch {
                     setToken(storedToken)
@@ -50,7 +63,7 @@ export function useAdminAuth({ isProduction, location, t }) {
         }
 
         checkAuth()
-    }, [handleLogout, isAdminRoute, t])
+    }, [handleAuthExpired, isAdminRoute])
 
     return {
         token,
@@ -60,5 +73,6 @@ export function useAdminAuth({ isProduction, location, t }) {
         showMessage,
         handleLogin,
         handleLogout,
+        handleAuthExpired,
     }
 }

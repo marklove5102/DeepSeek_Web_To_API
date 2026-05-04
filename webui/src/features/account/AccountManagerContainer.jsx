@@ -94,7 +94,7 @@ export default function AccountManagerContainer({ config, onRefresh, onMessage, 
                     </p>
                     <p className="mt-1 text-xs opacity-90">
                         {config?.env_writeback_enabled
-                            ? t('accountManager.envModeWritebackDesc', { path: config?.config_path || 'config.json' })
+                            ? t('accountManager.envModeWritebackDesc', { path: config?.config_path || 'data/config.json' })
                             : t('accountManager.envModeRiskDesc')}
                     </p>
                 </div>

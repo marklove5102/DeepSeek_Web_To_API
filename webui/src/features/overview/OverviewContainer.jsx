@@ -1,4 +1,4 @@
-import { Activity, ArrowDown, ArrowUp, Cpu, Database, DollarSign, Gauge, HardDrive, History, MemoryStick, RadioTower, Server, Sparkles, Zap } from 'lucide-react'
+import { Activity, ArrowDown, ArrowUp, CalendarDays, Cpu, Database, DollarSign, Gauge, HardDrive, History, MemoryStick, RadioTower, Server, Sparkles, Zap } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import clsx from 'clsx'
 
@@ -80,6 +80,10 @@ function formatBytes(value) {
 
 function formatBandwidth(value) {
     return `${formatBytes(value)}/s`
+}
+
+function tokenWindowTotals(metrics, key) {
+    return metrics?.token_windows?.[key]?.totals || {}
 }
 
 function loadStatusLabel(status) {
@@ -333,6 +337,21 @@ export default function OverviewContainer({ config, authFetch, onMessage }) {
     const tokenStats = metrics.tokens || {}
     const windowTokens = tokenStats.window || {}
     const totalTokens = tokenStats.total || {}
+    const tokenUsageWindows = [
+        { key: '24h', label: '24 小时', tone: 'blue' },
+        { key: '7d', label: '7 天', tone: 'emerald' },
+        { key: '15d', label: '15 天', tone: 'cyan' },
+        { key: '30d', label: '30 天', tone: 'amber' },
+    ].map(item => {
+        const totals = tokenWindowTotals(metrics, item.key)
+        return {
+            ...item,
+            total: Number(totals.total_tokens) || 0,
+            input: Number(totals.input_tokens) || 0,
+            output: Number(totals.output_tokens) || 0,
+            requests: Number(totals.requests) || 0,
+        }
+    })
     const cost = metrics.cost || {}
     const host = metrics.host || {}
     const hostCpu = host.cpu || {}
@@ -358,6 +377,33 @@ export default function OverviewContainer({ config, authFetch, onMessage }) {
                 <MetricCard icon={Gauge} label="负载状态" value={formatRate(hostLoad.load1)} hint={`5m ${formatRate(hostLoad.load5)} / 15m ${formatRate(hostLoad.load15)} · ${loadStatusLabel(hostLoad.status)}`} />
                 <MetricCard icon={ArrowUp} label="带宽上行" value={formatBandwidth(hostBandwidth.tx_bytes_per_sec)} hint={`累计 ${formatBytes(hostBandwidth.tx_total_bytes)}`} tone="cyan" />
                 <MetricCard icon={ArrowDown} label="带宽下行" value={formatBandwidth(hostBandwidth.rx_bytes_per_sec)} hint={`累计 ${formatBytes(hostBandwidth.rx_total_bytes)}`} tone="emerald" />
+            </div>
+
+            <div className="ops-panel p-4">
+                <div className="flex items-center justify-between gap-4">
+                    <div>
+                        <p className="ops-kicker">Token Usage</p>
+                        <h2 className="ops-heading mt-1">Token 使用量统计</h2>
+                    </div>
+                    <CalendarDays className="w-5 h-5 text-primary" />
+                </div>
+                <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+                    {tokenUsageWindows.map(item => (
+                        <div key={item.key} className={clsx('token-window-card', `token-window-card-${item.tone}`)}>
+                            <div className="flex items-start justify-between gap-3">
+                                <div>
+                                    <span>{item.label}</span>
+                                    <strong>{formatNumber(item.total)}</strong>
+                                </div>
+                                <em>{formatNumber(item.requests)} 次</em>
+                            </div>
+                            <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] font-black text-muted-foreground">
+                                <div>输入 {formatNumber(item.input)}</div>
+                                <div>输出 {formatNumber(item.output)}</div>
+                            </div>
+                        </div>
+                    ))}
+                </div>
             </div>
 
             <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.45fr),minmax(320px,0.85fr)] gap-4">

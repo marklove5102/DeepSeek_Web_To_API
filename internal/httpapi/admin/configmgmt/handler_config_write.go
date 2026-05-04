@@ -116,6 +116,7 @@ func (h *Handler) updateKey(w http.ResponseWriter, r *http.Request) {
 	}
 	name, nameOK := fieldStringOptional(req, "name")
 	remark, remarkOK := fieldStringOptional(req, "remark")
+	nextKey, nextKeyOK := fieldStringOptional(req, "key")
 
 	err := h.Store.Update(func(c *config.Config) error {
 		idx := -1
@@ -127,6 +128,20 @@ func (h *Handler) updateKey(w http.ResponseWriter, r *http.Request) {
 		}
 		if idx < 0 {
 			return fmt.Errorf("key 不存在")
+		}
+		if nextKeyOK {
+			nextKey = strings.TrimSpace(nextKey)
+			if nextKey == "" {
+				return fmt.Errorf("key 不能为空")
+			}
+			if nextKey != key {
+				for _, item := range c.APIKeys {
+					if item.Key == nextKey {
+						return fmt.Errorf("key 已存在")
+					}
+				}
+				c.APIKeys[idx].Key = nextKey
+			}
 		}
 		if nameOK {
 			c.APIKeys[idx].Name = name
@@ -170,6 +185,11 @@ func (h *Handler) batchImport(w http.ResponseWriter, r *http.Request) {
 	var req map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": "无效的 JSON 格式"})
+		return
+	}
+	textAccounts, textErr := parsePlainAccountLines(fieldString(req, "accounts_text"))
+	if textErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": textErr.Error()})
 		return
 	}
 	importedKeys, importedAccounts := 0, 0
@@ -216,6 +236,25 @@ func (h *Handler) batchImport(w http.ResponseWriter, r *http.Request) {
 				importedAccounts++
 			}
 		}
+		if len(textAccounts) > 0 {
+			existing := map[string]bool{}
+			for _, a := range c.Accounts {
+				a = normalizeAccountForStorage(a)
+				key := accountDedupeKey(a)
+				if key != "" {
+					existing[key] = true
+				}
+			}
+			for _, acc := range textAccounts {
+				key := accountDedupeKey(acc)
+				if key == "" || existing[key] {
+					continue
+				}
+				c.Accounts = append(c.Accounts, acc)
+				existing[key] = true
+				importedAccounts++
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -224,4 +263,40 @@ func (h *Handler) batchImport(w http.ResponseWriter, r *http.Request) {
 	}
 	h.Pool.Reset()
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "imported_keys": importedKeys, "imported_accounts": importedAccounts})
+}
+
+func parsePlainAccountLines(raw string) ([]config.Account, error) {
+	raw = strings.ReplaceAll(raw, "\r\n", "\n")
+	raw = strings.ReplaceAll(raw, "\r", "\n")
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	lines := strings.Split(raw, "\n")
+	accounts := make([]config.Account, 0, len(lines))
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+			continue
+		}
+		identifier, password, ok := strings.Cut(line, ":")
+		if !ok {
+			return nil, fmt.Errorf("第 %d 行格式错误，应为 账号:密码", i+1)
+		}
+		identifier = strings.TrimSpace(identifier)
+		password = strings.TrimSpace(password)
+		if identifier == "" || password == "" {
+			return nil, fmt.Errorf("第 %d 行账号或密码为空", i+1)
+		}
+		acc := config.Account{Password: password}
+		if strings.Contains(identifier, "@") {
+			acc.Email = identifier
+		} else {
+			acc.Mobile = config.NormalizeMobileForStorage(identifier)
+			if acc.Mobile == "" {
+				return nil, fmt.Errorf("第 %d 行手机号无效", i+1)
+			}
+		}
+		accounts = append(accounts, normalizeAccountForStorage(acc))
+	}
+	return normalizeAndDedupeAccounts(accounts), nil
 }

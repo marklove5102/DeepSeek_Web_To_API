@@ -27,14 +27,23 @@ func (s *Store) rebuildIndexes() {
 
 // findAccountIndexLocked expects the store lock to already be held.
 func (s *Store) findAccountIndexLocked(identifier string) (int, bool) {
-	if idx, ok := s.accMap[identifier]; ok && idx >= 0 && idx < len(s.cfg.Accounts) {
-		return idx, true
+	candidates := []string{identifier}
+	if mobile := CanonicalMobileKey(identifier); mobile != "" && mobile != identifier {
+		candidates = append(candidates, mobile)
+	}
+	for _, key := range candidates {
+		if idx, ok := s.accMap[key]; ok && idx >= 0 && idx < len(s.cfg.Accounts) {
+			return idx, true
+		}
 	}
 	// Fallback for token-only accounts whose derived identifier changed after
 	// a token refresh; this preserves correctness on map misses.
 	for i, acc := range s.cfg.Accounts {
-		if acc.Identifier() == identifier {
-			return i, true
+		id := acc.Identifier()
+		for _, key := range candidates {
+			if id == key {
+				return i, true
+			}
 		}
 	}
 	return -1, false

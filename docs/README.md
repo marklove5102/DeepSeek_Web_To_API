@@ -4,7 +4,7 @@
 **本文档引用的文件**
 - [README.MD](file://README.MD)
 - [API.md](file://API.md)
-- [config.example.json](file://config.example.json)
+- [.env.example](file://.env.example)
 - [cmd/DeepSeek_Web_To_API/main.go](file://cmd/DeepSeek_Web_To_API/main.go)
 - [internal/server/router.go](file://internal/server/router.go)
 </cite>
@@ -39,7 +39,7 @@
 graph TB
 subgraph "Entry"
 MAIN["cmd/DeepSeek_Web_To_API/main.go<br/>程序入口"]
-CONFIG["config.example.json<br/>单文件配置模板"]
+CONFIG[".env.example<br/>主配置模板"]
 end
 subgraph "Backend"
 SERVER["internal/server/router.go<br/>路由与中间件"]
@@ -78,7 +78,7 @@ WEBUI --> STATIC
 
 - `cmd/DeepSeek_Web_To_API/main.go`：加载 `.env`、读取配置、创建服务、构建 WebUI、校验管理端安全配置，并启动 HTTP Server。
 - `internal/server/router.go`：统一挂载 OpenAI、Claude、Gemini、Admin、WebUI、健康检查和中间件。
-- `internal/config`：负责单文件配置、环境变量覆盖、校验、导入导出和运行时访问器。
+- `internal/config`：负责 `.env`、结构化配置、账号 SQLite、校验、导入导出和运行时访问器。
 - `internal/account` 与 `internal/auth`：负责账号池、API Key 识别、直通 token、会话亲和与并发限制。
 - `internal/responsecache`：负责协议响应缓存，内存层与 gzip 磁盘层共享同一缓存键规则。
 - `internal/chathistory`：负责 SQLite 历史记录、旧 JSON 导入、保留数量、详情压缩和指标。
@@ -154,7 +154,7 @@ DS --> UPSTREAM
 
 | 文档 | 用途 |
 | --- | --- |
-| [configuration.md](file://docs/configuration.md) | 单文件配置、环境变量覆盖、默认值和安全要求 |
+| [configuration.md](file://docs/configuration.md) | `.env` 配置入口、账号 SQLite、默认值和安全要求 |
 | [deployment.md](file://docs/deployment.md) | 本地、Docker、二进制、反代部署 |
 | [storage-cache.md](file://docs/storage-cache.md) | SQLite 历史记录与响应缓存 |
 | [security.md](file://docs/security.md) | 鉴权、输入校验、敏感数据与部署边界 |
@@ -174,6 +174,8 @@ DS --> UPSTREAM
 ## 结论
 
 新的文档体系只描述当前项目实际存在的 Go 后端、React 管理台、Docker/GHCR 发布、SQLite 历史记录和多协议兼容实现。旧项目名称、旧仓库归属、旧部署入口和历史贡献者内容不再出现在文档体系内。
+
+管理台文档已覆盖侧边栏版本展示和 GitHub 新版本检测：前端每 30 秒检查一次最新 Release/tag，有新版本时提示用户跳转到发布页。
 
 **章节来源**
 - [README.MD](file://README.MD)

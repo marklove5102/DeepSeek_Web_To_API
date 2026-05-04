@@ -34,6 +34,7 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		m["server"] = c.Server
 	}
 	if strings.TrimSpace(c.Storage.DataDir) != "" ||
+		strings.TrimSpace(c.Storage.AccountsSQLitePath) != "" ||
 		strings.TrimSpace(c.Storage.ChatHistoryPath) != "" ||
 		strings.TrimSpace(c.Storage.ChatHistorySQLitePath) != "" ||
 		strings.TrimSpace(c.Storage.RawStreamSampleRoot) != "" {
