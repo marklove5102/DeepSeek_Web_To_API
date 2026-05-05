@@ -50,6 +50,15 @@ type ConfigReader interface {
 	CurrentInputFileMinChars() int
 	ThinkingInjectionEnabled() bool
 	ThinkingInjectionPrompt() string
+	// RemoteFileUploadEnabled controls whether the service forwards inline
+	// attachments (and the current-input-file transcript) to the upstream
+	// DeepSeek upload_file endpoint. When false (the production default),
+	// attachments are inlined as text directly in the prompt instead. The
+	// upstream endpoint is heavily rate-limited per account and was the
+	// dominant cause of production failure rate; operators can opt back in
+	// via DEEPSEEK_WEB_TO_API_REMOTE_FILE_UPLOAD_ENABLED=true if they
+	// have headroom.
+	RemoteFileUploadEnabled() bool
 }
 
 type Deps struct {

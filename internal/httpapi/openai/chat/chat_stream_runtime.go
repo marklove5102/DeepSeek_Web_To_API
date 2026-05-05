@@ -310,6 +310,7 @@ func (s *chatStreamRuntime) onParsed(parsed sse.LineResult) streamengine.ParsedD
 	}
 
 	contentSeen := false
+	toolCallJustCompleted := false
 	batch := chatDeltaBatch{runtime: s}
 	for _, p := range parsed.ToolDetectionThinkingParts {
 		trimmed := sse.TrimContinuationOverlap(s.toolDetectionThinking.String(), p.Text)
@@ -390,6 +391,7 @@ func (s *chatStreamRuntime) onParsed(parsed sse.LineResult) streamengine.ParsedD
 						}
 						s.sendDelta(tcDelta)
 						s.resetStreamToolCallState()
+						toolCallJustCompleted = true
 						continue
 					}
 					if evt.Content != "" && !s.requireToolCall {
@@ -404,5 +406,15 @@ func (s *chatStreamRuntime) onParsed(parsed sse.LineResult) streamengine.ParsedD
 		}
 	}
 	batch.flush()
+	if toolCallJustCompleted {
+		// Once a complete tool_call block has been delivered, stop consuming
+		// upstream SSE immediately and let finalize() emit the
+		// finish_reason="tool_calls" chunk + [DONE]. This avoids a known
+		// stream-cut symptom where DeepSeek occasionally fails to send the
+		// trailing [DONE] after a tool_call, leaving the engine to wait for
+		// idle/no-content timeouts (or client cancellation) and skip the
+		// final framing chunk. See Meow-Calculations/DeepSeek_Web_To_API#4.
+		return streamengine.ParsedDecision{ContentSeen: contentSeen, Stop: true, StopReason: streamengine.StopReasonHandlerRequested}
+	}
 	return streamengine.ParsedDecision{ContentSeen: contentSeen}
 }

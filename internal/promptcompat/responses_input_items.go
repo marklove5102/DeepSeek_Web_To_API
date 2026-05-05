@@ -158,6 +158,14 @@ func normalizeResponsesInputItemWithState(m map[string]any, callNameByID map[str
 				"content": txt,
 			}
 		}
+	case "compaction", "reasoning":
+		// Codex CLI inserts these synthetic items in the input array to carry
+		// server-side encrypted state across turns. We do not own that state
+		// (no Responses store on the upstream DeepSeek side), so we skip the
+		// item silently rather than forwarding the encrypted blob into the
+		// prompt or returning 400. Returning nil here lets the caller drop
+		// the entry from the normalized message stream.
+		return nil
 	}
 
 	if txt, _ := m["text"].(string); strings.TrimSpace(txt) != "" {

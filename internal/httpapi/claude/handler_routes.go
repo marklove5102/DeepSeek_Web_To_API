@@ -47,6 +47,11 @@ func RegisterRoutes(r chi.Router, h *Handler) {
 	r.Post("/v1/messages/count_tokens", h.CountTokens)
 	r.Post("/v1/v1/messages/count_tokens", h.CountTokens)
 	r.Post("/messages/count_tokens", h.CountTokens)
+	// /api/messages is an alias used by some client SDKs (e.g. OpenCode when a
+	// custom Anthropic baseURL is configured to a non-anthropic.com host) so
+	// they reach the messages handler without requiring users to append /v1.
+	r.Post("/api/messages", h.Messages)
+	r.Post("/api/messages/count_tokens", h.CountTokens)
 }
 
 func (h *Handler) ListModels(w http.ResponseWriter, _ *http.Request) {

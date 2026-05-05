@@ -311,6 +311,8 @@
         "metaStream": "Output mode",
         "metaCaller": "Caller fingerprint",
         "metaTime": "Completed at",
+        "metaRequestIP": "Client IP",
+        "metaConversationID": "Conversation ID",
         "metaUnknown": "Unknown",
         "backToTop": "Back to top",
         "backToBottom": "Jump to bottom",

@@ -9,7 +9,15 @@ import (
 	authn "DeepSeek_Web_To_API/internal/auth"
 	"DeepSeek_Web_To_API/internal/config"
 	"DeepSeek_Web_To_API/internal/responsecache"
+	"DeepSeek_Web_To_API/internal/safetystore"
 )
+
+// mirrorWarn logs a non-fatal failure when mirroring a config write into one
+// of the dedicated safety SQLite stores. The config-side write succeeds
+// regardless so the request itself is never blocked by sqlite I/O.
+func mirrorWarn(scope string, err error) {
+	config.Logger.Warn("[admin_settings_safety_mirror] write failed", "scope", scope, "error", err)
+}
 
 func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 	var req map[string]any
@@ -120,6 +128,30 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if safetyCfg != nil {
 			c.Safety = *safetyCfg
+			// Mirror the list fields into the dedicated SQLite stores so
+			// runtime state stays consistent across both sources. Failures
+			// here are logged and do not roll back the config write — the
+			// stores eventually catch up via the legacy fallback path in
+			// requestguard.
+			if h.SafetyWords != nil {
+				if err := h.SafetyWords.ReplaceKind(safetystore.KindContent, safetyCfg.BannedContent); err != nil {
+					mirrorWarn("safety_words.banned_content", err)
+				}
+				if err := h.SafetyWords.ReplaceKind(safetystore.KindRegex, safetyCfg.BannedRegex); err != nil {
+					mirrorWarn("safety_words.banned_regex", err)
+				}
+				if err := h.SafetyWords.ReplaceKind(safetystore.KindJailbreak, safetyCfg.Jailbreak.Patterns); err != nil {
+					mirrorWarn("safety_words.jailbreak", err)
+				}
+			}
+			if h.SafetyIPs != nil {
+				if err := h.SafetyIPs.ReplaceBlockedIPs(safetyCfg.BlockedIPs); err != nil {
+					mirrorWarn("safety_ips.blocked_ips", err)
+				}
+				if err := h.SafetyIPs.ReplaceBlockedConversationIDs(safetyCfg.BlockedConversationIDs); err != nil {
+					mirrorWarn("safety_ips.blocked_conversation_ids", err)
+				}
+			}
 		}
 		if aliasMap != nil {
 			c.ModelAliases = aliasMap

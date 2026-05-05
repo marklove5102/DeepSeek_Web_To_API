@@ -1,10 +1,4 @@
 {
-  "_comment": "DeepSeek_Web_To_API 结构化配置示例 - 推荐写入 .env 的 DEEPSEEK_WEB_TO_API_CONFIG_JSON；账号通过管理台文本导入并写入 SQLite",
-  "_doc": "详细文档: https://github.com/Meow-Calculations/DeepSeek_Web_To_API",
-  "keys": [
-    "your-api-key-1",
-    "your-api-key-2"
-  ],
   "api_keys": [
     {
       "key": "your-api-key-1",
@@ -34,24 +28,6 @@
     "gpt-5.3-codex": "deepseek-v4-pro",
     "o3": "deepseek-v4-pro"
   },
-  "compat": {
-    "wide_input_strict_output": true,
-    "strip_reference_markers": true
-  },
-  "responses": {
-    "store_ttl_seconds": 900
-  },
-  "current_input_file": {
-    "enabled": true,
-    "min_chars": 0
-  },
-  "thinking_injection": {
-    "enabled": true,
-    "prompt": ""
-  },
-  "embeddings": {
-    "provider": "deterministic"
-  },
   "admin": {
     "key": "change-me-admin-key",
     "password_hash": "",
@@ -61,25 +37,29 @@
   },
   "server": {
     "port": "5001",
-    "bind_addr": "0.0.0.0",
+    "bind_addr": "127.0.0.1",
     "log_level": "INFO",
     "static_admin_dir": "static/admin",
     "auto_build_webui": true,
-    "http_total_timeout_seconds": 7200
+    "http_total_timeout_seconds": 7200,
+    "remote_file_upload_enabled": false
   },
   "storage": {
     "data_dir": "data",
     "accounts_sqlite_path": "data/accounts.sqlite",
     "chat_history_path": "data/chat_history.json",
     "chat_history_sqlite_path": "data/chat_history.sqlite",
+    "token_usage_sqlite_path": "data/token_usage.sqlite",
+    "safety_words_sqlite_path": "data/safety_words.sqlite",
+    "safety_ips_sqlite_path": "data/safety_ips.sqlite",
     "raw_stream_sample_root": "tests/raw_stream_samples"
   },
   "cache": {
     "response": {
       "dir": "data/response_cache",
-      "memory_ttl_seconds": 300,
+      "memory_ttl_seconds": 1800,
       "memory_max_bytes": 3800000000,
-      "disk_ttl_seconds": 14400,
+      "disk_ttl_seconds": 86400,
       "disk_max_bytes": 16000000000,
       "max_body_bytes": 67108864,
       "semantic_key": true
@@ -103,6 +83,20 @@
     "global_max_inflight": 0,
     "token_refresh_interval_hours": 6
   },
+  "responses": {
+    "store_ttl_seconds": 900
+  },
+  "current_input_file": {
+    "enabled": true,
+    "min_chars": 0
+  },
+  "thinking_injection": {
+    "enabled": true,
+    "prompt": ""
+  },
+  "embeddings": {
+    "provider": "deterministic"
+  },
   "auto_delete": {
     "mode": "none",
     "sessions": false
@@ -110,5 +104,9 @@
   "history_split": {
     "enabled": false,
     "trigger_after_turns": 1
+  },
+  "compat": {
+    "wide_input_strict_output": true,
+    "strip_reference_markers": true
   }
 }

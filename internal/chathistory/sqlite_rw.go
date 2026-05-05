@@ -9,13 +9,13 @@ import (
 
 const sqliteReadAllSummariesQuery = `SELECT
 	id, revision, created_at, updated_at, completed_at, status, caller_id,
-	account_id, model, stream, user_input, preview, status_code, elapsed_ms,
+	account_id, request_ip, conversation_id, model, stream, user_input, preview, status_code, elapsed_ms,
 	finish_reason, detail_revision, usage_json
 	FROM chat_history ORDER BY updated_at DESC, created_at DESC`
 
 const sqliteReadPageSummariesQuery = `SELECT
 	id, revision, created_at, updated_at, completed_at, status, caller_id,
-	account_id, model, stream, user_input, preview, status_code, elapsed_ms,
+	account_id, request_ip, conversation_id, model, stream, user_input, preview, status_code, elapsed_ms,
 	finish_reason, detail_revision, usage_json
 	FROM chat_history ORDER BY updated_at DESC, created_at DESC LIMIT ? OFFSET ?`
 
@@ -209,6 +209,8 @@ func scanSQLiteSummary(scanner sqliteSummaryScanner) (SummaryEntry, error) {
 		&item.Status,
 		&item.CallerID,
 		&item.AccountID,
+		&item.RequestIP,
+		&item.ConversationID,
 		&item.Model,
 		&stream,
 		&item.UserInput,

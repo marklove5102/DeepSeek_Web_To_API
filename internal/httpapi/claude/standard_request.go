@@ -33,6 +33,16 @@ func normalizeClaudeRequest(store ConfigReader, req map[string]any) (claudeNorma
 	}
 	payload["messages"] = normalizedMessages
 	toolsRequested, _ := req["tools"].([]any)
+	// Anthropic Messages API allows clients to declare MCP servers via
+	// "mcp_servers". The upstream DeepSeek web channel cannot natively dispatch
+	// MCP, but we still expand each server's advertised tools into virtual
+	// entries so the model sees them in the system prompt and emits standard
+	// tool_use blocks. The client SDK is responsible for routing those calls
+	// to its MCP server.
+	if mcpTools := expandMCPServersAsTools(req["mcp_servers"]); len(mcpTools) > 0 {
+		toolsRequested = append(toolsRequested, mcpTools...)
+		payload["tools"] = toolsRequested
+	}
 	payload["messages"] = injectClaudeToolPrompt(payload, normalizedMessages, toolsRequested)
 
 	dsPayload := convertClaudeToDeepSeek(payload, store)
@@ -116,6 +126,136 @@ func mergeSystemPrompt(base, extra string) string {
 	default:
 		return base + "\n\n" + extra
 	}
+}
+
+// expandMCPServersAsTools converts the Anthropic-style "mcp_servers" array into
+// a slice of virtual tool descriptors that look like ordinary Claude tools
+// ({"name", "description"} only). Real MCP dispatch is delegated to the
+// downstream client; here we only ensure the model is aware of the tool names
+// so it can emit valid tool_use blocks.
+//
+// Each server is an object such as:
+//
+//	{
+//	  "type": "url",
+//	  "url":  "https://example/mcp",
+//	  "name": "github",
+//	  "tool_configuration": { "allowed_tools": ["github_repo_search", ...] }
+//	}
+//
+// The resulting tool name uses the form "<server>.<tool>" so the client can
+// route the dispatch back to the correct MCP server. When a server lists no
+// tools we still emit a single placeholder so the system prompt mentions the
+// server.
+func expandMCPServersAsTools(raw any) []any {
+	servers, ok := raw.([]any)
+	if !ok || len(servers) == 0 {
+		return nil
+	}
+	out := make([]any, 0, len(servers))
+	for _, item := range servers {
+		server, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		serverName := strings.TrimSpace(asStringField(server["name"]))
+		if serverName == "" {
+			serverName = strings.TrimSpace(asStringField(server["url"]))
+		}
+		if serverName == "" {
+			continue
+		}
+		// Skip servers explicitly disabled by tool_configuration.enabled = false.
+		if cfg, ok := server["tool_configuration"].(map[string]any); ok {
+			if enabled, present := cfg["enabled"].(bool); present && !enabled {
+				continue
+			}
+		}
+		toolNames := mcpAdvertisedToolNames(server)
+		if len(toolNames) == 0 {
+			out = append(out, map[string]any{
+				"name":        sanitizeToolName(serverName),
+				"description": fmt.Sprintf("MCP server %q (no tool list provided; pass arguments through as-is).", serverName),
+			})
+			continue
+		}
+		for _, toolName := range toolNames {
+			toolName = strings.TrimSpace(toolName)
+			if toolName == "" {
+				continue
+			}
+			out = append(out, map[string]any{
+				"name":        sanitizeToolName(serverName + "." + toolName),
+				"description": fmt.Sprintf("MCP tool %q exposed by server %q.", toolName, serverName),
+			})
+		}
+	}
+	return out
+}
+
+func mcpAdvertisedToolNames(server map[string]any) []string {
+	names := []string{}
+	if cfg, ok := server["tool_configuration"].(map[string]any); ok {
+		if list, ok := cfg["allowed_tools"].([]any); ok {
+			for _, v := range list {
+				if s := strings.TrimSpace(asStringField(v)); s != "" {
+					names = append(names, s)
+				}
+			}
+		}
+	}
+	if list, ok := server["tools"].([]any); ok {
+		for _, v := range list {
+			switch t := v.(type) {
+			case string:
+				if s := strings.TrimSpace(t); s != "" {
+					names = append(names, s)
+				}
+			case map[string]any:
+				if s := strings.TrimSpace(asStringField(t["name"])); s != "" {
+					names = append(names, s)
+				}
+			}
+		}
+	}
+	return names
+}
+
+func asStringField(v any) string {
+	switch s := v.(type) {
+	case string:
+		return s
+	case fmt.Stringer:
+		return s.String()
+	case nil:
+		return ""
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+func sanitizeToolName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "mcp_tool"
+	}
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '_', r == '-', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	out := b.String()
+	if out == "" {
+		return "mcp_tool"
+	}
+	return out
 }
 
 func cloneAnySlice(in []any) []any {

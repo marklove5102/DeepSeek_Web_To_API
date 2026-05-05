@@ -167,6 +167,7 @@ type ServerConfig struct {
 	StaticAdminDir          string `json:"static_admin_dir,omitempty"`
 	AutoBuildWebUI          *bool  `json:"auto_build_webui,omitempty"`
 	HTTPTotalTimeoutSeconds int    `json:"http_total_timeout_seconds,omitempty"`
+	RemoteFileUploadEnabled *bool  `json:"remote_file_upload_enabled,omitempty"`
 }
 
 type StorageConfig struct {
@@ -174,6 +175,9 @@ type StorageConfig struct {
 	AccountsSQLitePath    string `json:"accounts_sqlite_path,omitempty"`
 	ChatHistoryPath       string `json:"chat_history_path,omitempty"`
 	ChatHistorySQLitePath string `json:"chat_history_sqlite_path,omitempty"`
+	TokenUsageSQLitePath  string `json:"token_usage_sqlite_path,omitempty"`
+	SafetyWordsSQLitePath string `json:"safety_words_sqlite_path,omitempty"`
+	SafetyIPsSQLitePath   string `json:"safety_ips_sqlite_path,omitempty"`
 	RawStreamSampleRoot   string `json:"raw_stream_sample_root,omitempty"`
 }
 

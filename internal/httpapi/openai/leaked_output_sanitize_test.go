@@ -13,6 +13,38 @@ func TestSanitizeLeakedOutputRemovesEmptyJSONFence(t *testing.T) {
 	}
 }
 
+// Regression for github.com/Meow-Calculations/DeepSeek_Web_To_API#7:
+// the upstream sometimes emits the DeepSeek special token close fence using a
+// full-width slash (U+FF0F) and dangling DSML markup that the sieve could not
+// capture. Both must be stripped from final visible output.
+func TestSanitizeLeakedOutputRemovesFullWidthSlashAndDanglingDSML(t *testing.T) {
+	raw := "<｜end▁of▁sentence｜><｜Tool｜>\nThe user selected the lines.\n\n" +
+		"<｜end▁of▁sentence｜><｜Tool／>Launching skill:\n\n" +
+		"<|tool_calls\n" +
+		"    <|DSML|invoke name=\"Bash\">\n" +
+		"      <|DSML|parameter name=\"command\"></|DSML|parameter>\n" +
+		"    </|DSML|invoke>\n" +
+		"  </|DSML|tool_calls>\n\n" +
+		"<｜end▁of▁sentence｜><｜Tool／>\n\n" +
+		"<|end_of_tool_result|tool_use_error: Tool bash not found in tool list."
+	got := sanitizeLeakedOutput(raw)
+	for _, marker := range []string{
+		"<｜Tool／>",
+		"<｜Tool｜>",
+		"<｜end▁of▁sentence｜>",
+		"<|tool_calls",
+		"<|DSML|",
+		"<|end_of_tool_result|",
+	} {
+		if strings.Contains(got, marker) {
+			t.Fatalf("expected sanitizer to remove %q, got %q", marker, got)
+		}
+	}
+	if !strings.Contains(got, "The user selected the lines.") {
+		t.Fatalf("sanitizer must not strip surrounding visible text, got %q", got)
+	}
+}
+
 func TestSanitizeLeakedOutputRemovesLeakedWireToolCallAndResult(t *testing.T) {
 	raw := "开始\n[{\"function\":{\"arguments\":\"{\\\"command\\\":\\\"java -version\\\"}\",\"name\":\"exec\"},\"id\":\"callb9a321\",\"type\":\"function\"}]< | Tool | >{\"content\":\"openjdk version 21\",\"tool_call_id\":\"callb9a321\"}\n结束"
 	got := sanitizeLeakedOutput(raw)

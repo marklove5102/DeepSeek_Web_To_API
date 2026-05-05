@@ -41,19 +41,21 @@ func (s *sqliteStore) Start(params StartParams) (Entry, error) {
 		status = "streaming"
 	}
 	entry := Entry{
-		ID:          "chat_" + strings.ReplaceAll(uuid.NewString(), "-", ""),
-		Revision:    revision,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-		Status:      status,
-		CallerID:    strings.TrimSpace(params.CallerID),
-		AccountID:   strings.TrimSpace(params.AccountID),
-		Model:       strings.TrimSpace(params.Model),
-		Stream:      params.Stream,
-		UserInput:   strings.TrimSpace(params.UserInput),
-		Messages:    cloneMessages(params.Messages),
-		HistoryText: params.HistoryText,
-		FinalPrompt: strings.TrimSpace(params.FinalPrompt),
+		ID:             "chat_" + strings.ReplaceAll(uuid.NewString(), "-", ""),
+		Revision:       revision,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		Status:         status,
+		CallerID:       strings.TrimSpace(params.CallerID),
+		AccountID:      strings.TrimSpace(params.AccountID),
+		RequestIP:      strings.TrimSpace(params.RequestIP),
+		ConversationID: strings.TrimSpace(params.ConversationID),
+		Model:          strings.TrimSpace(params.Model),
+		Stream:         params.Stream,
+		UserInput:      strings.TrimSpace(params.UserInput),
+		Messages:       cloneMessages(params.Messages),
+		HistoryText:    params.HistoryText,
+		FinalPrompt:    strings.TrimSpace(params.FinalPrompt),
 	}
 	if err := s.upsertEntryLocked(tx, entry); err != nil {
 		return Entry{}, err
@@ -259,9 +261,9 @@ func (s *sqliteStore) upsertEntryLocked(tx *sql.Tx, item Entry) error {
 	_, err = tx.Exec(
 		`INSERT INTO chat_history (
 			id, revision, created_at, updated_at, completed_at, status, caller_id,
-			account_id, model, stream, user_input, preview, status_code, elapsed_ms,
+			account_id, request_ip, conversation_id, model, stream, user_input, preview, status_code, elapsed_ms,
 			finish_reason, detail_revision, usage_json, detail_json, detail_encoding, detail_blob
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			revision = excluded.revision,
 			created_at = excluded.created_at,
@@ -270,6 +272,8 @@ func (s *sqliteStore) upsertEntryLocked(tx *sql.Tx, item Entry) error {
 			status = excluded.status,
 			caller_id = excluded.caller_id,
 			account_id = excluded.account_id,
+			request_ip = excluded.request_ip,
+			conversation_id = excluded.conversation_id,
 			model = excluded.model,
 			stream = excluded.stream,
 			user_input = excluded.user_input,
@@ -290,6 +294,8 @@ func (s *sqliteStore) upsertEntryLocked(tx *sql.Tx, item Entry) error {
 		summary.Status,
 		summary.CallerID,
 		summary.AccountID,
+		summary.RequestIP,
+		summary.ConversationID,
 		summary.Model,
 		boolToSQLiteInt(summary.Stream),
 		summary.UserInput,

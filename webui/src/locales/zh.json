@@ -311,6 +311,8 @@
         "metaStream": "输出模式",
         "metaCaller": "调用方指纹",
         "metaTime": "完成时间",
+        "metaRequestIP": "客户端 IP",
+        "metaConversationID": "对话 ID",
         "metaUnknown": "未知",
         "backToTop": "回到顶部",
         "backToBottom": "跳到底部",

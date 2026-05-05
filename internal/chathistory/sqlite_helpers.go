@@ -186,7 +186,10 @@ func (s *sqliteStore) addTokenRollupLocked(tx *sql.Tx, totalDelta TokenUsageTota
 	if totalDelta.Requests <= 0 && len(byModelDelta) == 0 {
 		return nil
 	}
-	total, byModel, err := s.tokenRollupLocked(tx)
+	// Maintain the legacy chat_history_meta rollup alongside the dedicated
+	// token stats DB so the two never drift; legacy data continues to work
+	// even when the dedicated DB is disabled.
+	total, byModel, err := s.tokenRollupFromLegacyMetaLocked(tx)
 	if err != nil {
 		return err
 	}
@@ -197,10 +200,35 @@ func (s *sqliteStore) addTokenRollupLocked(tx *sql.Tx, totalDelta TokenUsageTota
 	if err := s.setMetaJSONLocked(tx, sqliteMetaPrunedTokenTotal, total); err != nil {
 		return err
 	}
-	return s.setMetaJSONLocked(tx, sqliteMetaPrunedTokenByModel, byModel)
+	if err := s.setMetaJSONLocked(tx, sqliteMetaPrunedTokenByModel, byModel); err != nil {
+		return err
+	}
+	if s.tokenStats != nil {
+		if err := s.tokenStats.addRollup(totalDelta, byModelDelta); err != nil {
+			return fmt.Errorf("mirror token rollup to dedicated store: %w", err)
+		}
+	}
+	return nil
 }
 
+// tokenRollupLocked returns the persisted pruned rollup. When the dedicated
+// token stats DB is available it is preferred; otherwise we fall back to the
+// legacy keys in chat_history_meta. Both paths return zero-value totals when
+// no rollup has been written yet.
 func (s *sqliteStore) tokenRollupLocked(tx *sql.Tx) (TokenUsageTotals, map[string]TokenUsageTotals, error) {
+	if s.tokenStats != nil {
+		total, byModel, err := s.tokenStats.readRollup()
+		if err == nil {
+			if byModel == nil {
+				byModel = map[string]TokenUsageTotals{}
+			}
+			return total, byModel, nil
+		}
+	}
+	return s.tokenRollupFromLegacyMetaLocked(tx)
+}
+
+func (s *sqliteStore) tokenRollupFromLegacyMetaLocked(tx *sql.Tx) (TokenUsageTotals, map[string]TokenUsageTotals, error) {
 	total := TokenUsageTotals{}
 	byModel := map[string]TokenUsageTotals{}
 	if err := s.metaJSONLocked(tx, sqliteMetaPrunedTokenTotal, &total); err != nil {
@@ -254,6 +282,11 @@ func (s *sqliteStore) clearPrunedMetricsLocked(tx *sql.Tx) error {
 	} {
 		if _, err := tx.Exec(`DELETE FROM chat_history_meta WHERE key = ?`, key); err != nil {
 			return fmt.Errorf("clear chat history sqlite meta %s: %w", key, err)
+		}
+	}
+	if s.tokenStats != nil {
+		if err := s.tokenStats.clearRollup(); err != nil {
+			return fmt.Errorf("clear dedicated token stats rollup: %w", err)
 		}
 	}
 	return nil

@@ -28,6 +28,7 @@ import (
 	"DeepSeek_Web_To_API/internal/httpapi/openai/responses"
 	"DeepSeek_Web_To_API/internal/httpapi/openai/shared"
 	"DeepSeek_Web_To_API/internal/httpapi/requestbody"
+	"DeepSeek_Web_To_API/internal/safetystore"
 	"DeepSeek_Web_To_API/internal/requestguard"
 	"DeepSeek_Web_To_API/internal/requestmeta"
 	"DeepSeek_Web_To_API/internal/responsecache"
@@ -58,9 +59,35 @@ func NewApp() (*App, error) {
 	} else {
 		config.Logger.Info("[PoW] pure Go solver ready")
 	}
-	chatHistoryStore := chathistory.NewSQLite(store.ChatHistorySQLitePath(), store.ChatHistoryPath())
+	chatHistoryStore := chathistory.NewSQLiteWithTokenStats(store.ChatHistorySQLitePath(), store.ChatHistoryPath(), store.TokenUsageSQLitePath())
 	if err := chatHistoryStore.Err(); err != nil {
 		config.Logger.Warn("[chat_history] unavailable", "path", chatHistoryStore.Path(), "error", err)
+	}
+
+	// Dedicated SQLite stores for the safety policy lists. These run in
+	// parallel to the legacy config.SafetyConfig list fields; on first start
+	// any pre-existing config-side lists are migrated into the store and
+	// future admin saves dual-write to keep both sources in sync.
+	safetyWordsStore, err := safetystore.NewWordsStore(store.SafetyWordsSQLitePath())
+	if err != nil {
+		config.Logger.Warn("[safety_words] unavailable", "path", store.SafetyWordsSQLitePath(), "error", err)
+	}
+	safetyIPsStore, err := safetystore.NewIPsStore(store.SafetyIPsSQLitePath())
+	if err != nil {
+		config.Logger.Warn("[safety_ips] unavailable", "path", store.SafetyIPsSQLitePath(), "error", err)
+	}
+	if safetyWordsStore != nil || safetyIPsStore != nil {
+		legacy := store.SafetyConfig()
+		if safetyWordsStore != nil {
+			if err := safetyWordsStore.MigrateLegacyOnce(legacy.BannedContent, legacy.BannedRegex, legacy.Jailbreak.Patterns); err != nil {
+				config.Logger.Warn("[safety_words] legacy migration failed", "error", err)
+			}
+		}
+		if safetyIPsStore != nil {
+			if err := safetyIPsStore.MigrateLegacyOnce(legacy.BlockedIPs, nil, legacy.BlockedConversationIDs); err != nil {
+				config.Logger.Warn("[safety_ips] legacy migration failed", "error", err)
+			}
+		}
 	}
 
 	modelsHandler := &shared.ModelsHandler{Store: store}
@@ -80,7 +107,7 @@ func NewApp() (*App, error) {
 		SemanticKey:    store.ResponseCacheSemanticKey(),
 		OnHit:          responsesHandler.OnProtocolResponseCacheHit,
 	})
-	adminHandler := &admin.Handler{Store: store, Pool: pool, DS: dsClient, OpenAI: chatHandler, ChatHistory: chatHistoryStore, ResponseCache: protocolResponseCache}
+	adminHandler := &admin.Handler{Store: store, Pool: pool, DS: dsClient, OpenAI: chatHandler, ChatHistory: chatHistoryStore, ResponseCache: protocolResponseCache, SafetyWords: safetyWordsStore, SafetyIPs: safetyIPsStore}
 	webuiHandler := webui.NewHandler(store.StaticAdminDir())
 
 	r := chi.NewRouter()
@@ -90,7 +117,12 @@ func NewApp() (*App, error) {
 	r.Use(middleware.Recoverer)
 	r.Use(cors)
 	r.Use(securityHeaders)
-	r.Use(requestguard.Middleware(requestguard.Options{Store: store, ChatHistory: chatHistoryStore}))
+	r.Use(requestguard.Middleware(requestguard.Options{
+		Store:       store,
+		ChatHistory: chatHistoryStore,
+		SafetyWords: safetyWordsStore,
+		SafetyIPs:   safetyIPsStore,
+	}))
 	r.Use(requestbody.ValidateJSONUTF8)
 	r.Use(timeout(0))
 	r.Use(protocolResponseCache.Middleware(resolver))
@@ -114,6 +146,15 @@ func NewApp() (*App, error) {
 	r.Post("/v1/chat/completions", chatHandler.ChatCompletions)
 	r.Post("/v1/responses", responsesHandler.Responses)
 	r.Get("/v1/responses/{response_id}", responsesHandler.GetResponseByID)
+	// Codex CLI may attempt server-side context compaction via this endpoint
+	// when context_management.compact_threshold is configured. We do not
+	// own the upstream Responses store and cannot honour the request, so we
+	// answer 501 (with the OpenAI-style error envelope) instead of 404 — the
+	// CLI then falls back to client-side context truncation rather than
+	// retrying indefinitely against a non-existent route.
+	r.Post("/v1/responses/compact", responsesCompactNotImplemented)
+	r.Post("/v1/v1/responses/compact", responsesCompactNotImplemented)
+	r.Post("/responses/compact", responsesCompactNotImplemented)
 	r.Post("/v1/files", filesHandler.UploadFile)
 	r.Post("/v1/embeddings", embeddingsHandler.Embeddings)
 	// Some SDK wrappers append their own /v1 prefix even when users configure
@@ -190,6 +231,16 @@ func timeout(d time.Duration) func(http.Handler) http.Handler {
 		return func(next http.Handler) http.Handler { return next }
 	}
 	return middleware.Timeout(d)
+}
+
+// responsesCompactNotImplemented answers Codex CLI's optional
+// /v1/responses/compact requests with a structured 501 instead of a default
+// 404, so the CLI falls back to client-side truncation rather than treating
+// the route as missing infrastructure.
+func responsesCompactNotImplemented(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotImplemented)
+	_, _ = w.Write([]byte(`{"error":{"message":"Server-side context compaction is not supported by this proxy. Please rely on client-side context management.","type":"not_implemented","code":"compact_not_supported","param":null}}`))
 }
 
 func filteredLogger() func(http.Handler) http.Handler {

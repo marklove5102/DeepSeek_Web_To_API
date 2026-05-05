@@ -21,6 +21,7 @@ type sqliteStore struct {
 	legacyDetailDir string
 	db              *sql.DB
 	err             error
+	tokenStats      *tokenStatsStore
 }
 
 type sqliteColumnInfo struct {
@@ -28,7 +29,7 @@ type sqliteColumnInfo struct {
 	ddl  string
 }
 
-func newSQLiteStore(path, legacyPath string) (*sqliteStore, error) {
+func newSQLiteStore(path, legacyPath, tokenStatsPath string) (*sqliteStore, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, errors.New("chat history sqlite path is required")
@@ -55,6 +56,22 @@ func newSQLiteStore(path, legacyPath string) (*sqliteStore, error) {
 		_ = db.Close()
 		return nil, store.err
 	}
+	if strings.TrimSpace(tokenStatsPath) != "" {
+		ts, err := newTokenStatsStore(tokenStatsPath)
+		if err != nil {
+			// Non-fatal: chat history continues to work without dedicated
+			// token stats; log via store.err is undesirable here so we just
+			// leave tokenStats nil and rely on legacy chat_history_meta.
+			store.tokenStats = nil
+		} else {
+			store.tokenStats = ts
+			if err := store.migrateLegacyTokenRollupIfNeeded(); err != nil {
+				// Migration failure is also non-fatal; keep going with the
+				// dedicated store empty + legacy fallback in tokenRollupLocked.
+				_ = err
+			}
+		}
+	}
 	return store, nil
 }
 
@@ -73,10 +90,53 @@ func (s *sqliteStore) Err() error {
 }
 
 func (s *sqliteStore) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil
 	}
-	return s.db.Close()
+	var firstErr error
+	if s.tokenStats != nil {
+		if err := s.tokenStats.Close(); err != nil {
+			firstErr = err
+		}
+	}
+	if s.db != nil {
+		if err := s.db.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// migrateLegacyTokenRollupIfNeeded reads the legacy token rollup that used to
+// live in chat_history_meta and copies it into the dedicated token stats DB.
+// Idempotent: it consults the dedicated DB's "migrated_from_chat_history" flag
+// before doing anything.
+func (s *sqliteStore) migrateLegacyTokenRollupIfNeeded() error {
+	if s == nil || s.db == nil || s.tokenStats == nil {
+		return nil
+	}
+	migrated, err := s.tokenStats.hasMigrated()
+	if err != nil {
+		return err
+	}
+	if migrated {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin legacy token rollup migration: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	legacyTotal, legacyByModel, err := s.tokenRollupFromLegacyMetaLocked(tx)
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit legacy token rollup migration read: %w", err)
+	}
+	return s.tokenStats.migrateLegacyRollupOnce(legacyTotal, legacyByModel)
 }
 
 func (s *sqliteStore) init() error {
@@ -146,6 +206,8 @@ func (s *sqliteStore) initSchemaLocked(tx *sql.Tx) error {
 			status TEXT NOT NULL,
 			caller_id TEXT NOT NULL DEFAULT '',
 			account_id TEXT NOT NULL DEFAULT '',
+			request_ip TEXT NOT NULL DEFAULT '',
+			conversation_id TEXT NOT NULL DEFAULT '',
 			model TEXT NOT NULL DEFAULT '',
 			stream INTEGER NOT NULL DEFAULT 0,
 			user_input TEXT NOT NULL DEFAULT '',
@@ -173,6 +235,8 @@ func (s *sqliteStore) initSchemaLocked(tx *sql.Tx) error {
 	for _, column := range []sqliteColumnInfo{
 		{name: "detail_encoding", ddl: `ALTER TABLE chat_history ADD COLUMN detail_encoding TEXT NOT NULL DEFAULT ''`},
 		{name: "detail_blob", ddl: `ALTER TABLE chat_history ADD COLUMN detail_blob BLOB NOT NULL DEFAULT X''`},
+		{name: "request_ip", ddl: `ALTER TABLE chat_history ADD COLUMN request_ip TEXT NOT NULL DEFAULT ''`},
+		{name: "conversation_id", ddl: `ALTER TABLE chat_history ADD COLUMN conversation_id TEXT NOT NULL DEFAULT ''`},
 	} {
 		if err := ensureChatHistoryColumnLocked(tx, column); err != nil {
 			return err

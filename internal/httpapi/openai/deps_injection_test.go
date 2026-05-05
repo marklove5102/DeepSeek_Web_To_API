@@ -46,6 +46,7 @@ func (m mockOpenAIConfig) HistorySplitTriggerAfterTurns() int {
 	return m.historySplitTurns
 }
 func (m mockOpenAIConfig) CurrentInputFileEnabled() bool { return m.currentInputEnabled }
+func (m mockOpenAIConfig) RemoteFileUploadEnabled() bool { return true }
 func (m mockOpenAIConfig) CurrentInputFileMinChars() int {
 	return m.currentInputMin
 }

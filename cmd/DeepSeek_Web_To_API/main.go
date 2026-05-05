@@ -41,13 +41,25 @@ func main() {
 	}
 	port := app.Store.ServerPort()
 	bindAddr := app.Store.ServerBindAddr()
+	// Honour the user-configured DEEPSEEK_WEB_TO_API_HTTP_TOTAL_TIMEOUT_SECONDS
+	// (default 7200s) for both ReadTimeout and WriteTimeout. Streaming
+	// completions for the Pro models can spend several minutes between
+	// upstream PoW + reasoning + auto-continue and a hard-coded 120s ceiling
+	// would chop the SSE response mid-flight. Setting WriteTimeout=0 disables
+	// the standard library write deadline entirely; doing so here would
+	// expose us to slowloris-style hangs, so we keep a generous bound that
+	// the operator can still tune via env/config.
+	httpTotalTimeout := app.Store.HTTPTotalTimeout()
+	if httpTotalTimeout <= 0 {
+		httpTotalTimeout = 2 * time.Hour
+	}
 
 	srv := &http.Server{
 		Addr:              bindAddr + ":" + port,
 		Handler:           app.Router,
 		ReadHeaderTimeout: 15 * time.Second,
-		ReadTimeout:       120 * time.Second,
-		WriteTimeout:      120 * time.Second,
+		ReadTimeout:       httpTotalTimeout,
+		WriteTimeout:      httpTotalTimeout,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}

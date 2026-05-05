@@ -16,6 +16,7 @@ import (
 	"DeepSeek_Web_To_API/internal/config"
 	"DeepSeek_Web_To_API/internal/requestmeta"
 	"DeepSeek_Web_To_API/internal/responsecache"
+	"DeepSeek_Web_To_API/internal/safetystore"
 )
 
 const (
@@ -31,6 +32,12 @@ const metadataContextKey contextKey = "request_guard_metadata"
 type Options struct {
 	Store       *config.Store
 	ChatHistory *chathistory.Store
+	// SafetyWords / SafetyIPs are the dedicated SQLite stores for the
+	// safety-policy lists. When wired they are the source of truth; the
+	// legacy config.SafetyConfig list fields still take effect as a
+	// fallback for setups that have not yet migrated.
+	SafetyWords *safetystore.WordsStore
+	SafetyIPs   *safetystore.IPsStore
 }
 
 type decision struct {
@@ -57,10 +64,12 @@ type ipMatcher struct {
 }
 
 type policyCache struct {
-	store     *config.Store
-	mu        sync.Mutex
-	signature string
-	cached    policy
+	store       *config.Store
+	safetyWords *safetystore.WordsStore
+	safetyIPs   *safetystore.IPsStore
+	mu          sync.Mutex
+	signature   string
+	cached      policy
 }
 
 var defaultJailbreakPatterns = []string{
@@ -83,7 +92,7 @@ var defaultJailbreakPatterns = []string{
 }
 
 func Middleware(opts Options) func(http.Handler) http.Handler {
-	policies := &policyCache{store: opts.Store}
+	policies := &policyCache{store: opts.Store, safetyWords: opts.SafetyWords, safetyIPs: opts.SafetyIPs}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			rawBody := []byte(nil)
@@ -158,6 +167,7 @@ func (c *policyCache) load() policy {
 	if c != nil && c.store != nil {
 		cfg = c.store.SafetyConfig()
 	}
+	cfg = mergeSafetySources(cfg, c)
 	signature := safetyConfigSignature(cfg)
 	if c != nil {
 		c.mu.Lock()
@@ -173,6 +183,52 @@ func (c *policyCache) load() policy {
 		return p
 	}
 	return buildPolicy(cfg)
+}
+
+// mergeSafetySources combines the legacy config.SafetyConfig lists with the
+// dedicated SQLite stores. SQLite values are appended to the config-supplied
+// values so an upgrade is non-destructive: data that lives in either source
+// (or both) reaches the policy. Duplicates are removed in buildPolicy via
+// the existing dedupe-by-string normalization.
+func mergeSafetySources(cfg config.SafetyConfig, c *policyCache) config.SafetyConfig {
+	if c == nil {
+		return cfg
+	}
+	if c.safetyWords != nil {
+		if content, regex, jail, err := c.safetyWords.Snapshot(); err == nil {
+			cfg.BannedContent = appendUnique(cfg.BannedContent, content)
+			cfg.BannedRegex = appendUnique(cfg.BannedRegex, regex)
+			cfg.Jailbreak.Patterns = appendUnique(cfg.Jailbreak.Patterns, jail)
+		}
+	}
+	if c.safetyIPs != nil {
+		if blocked, _, blockedConv, err := c.safetyIPs.Snapshot(); err == nil {
+			// allowed_ips is reserved for future opt-in allowlist semantics
+			// and is intentionally not yet consumed by buildPolicy.
+			cfg.BlockedIPs = appendUnique(cfg.BlockedIPs, blocked)
+			cfg.BlockedConversationIDs = appendUnique(cfg.BlockedConversationIDs, blockedConv)
+		}
+	}
+	return cfg
+}
+
+func appendUnique(base, extra []string) []string {
+	if len(extra) == 0 {
+		return base
+	}
+	seen := make(map[string]struct{}, len(base)+len(extra))
+	for _, v := range base {
+		seen[v] = struct{}{}
+	}
+	out := append([]string(nil), base...)
+	for _, v := range extra {
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
 }
 
 func safetyConfigSignature(cfg config.SafetyConfig) string {
@@ -227,6 +283,9 @@ func buildPolicy(cfg config.SafetyConfig) policy {
 	}
 	if cfg.Jailbreak.Enabled != nil {
 		p.jailbreakEnabled = *cfg.Jailbreak.Enabled
+	} else {
+		// default-on when safety is enabled and operator left jailbreak unspecified
+		p.jailbreakEnabled = true
 	}
 	for _, item := range append(defaultJailbreakPatterns, cfg.Jailbreak.Patterns...) {
 		item = strings.ToLower(strings.TrimSpace(item))
@@ -262,6 +321,9 @@ func (p policy) evaluate(r *http.Request, body []byte, meta requestmeta.Metadata
 		if _, ok := p.blockedConversationIDs[strings.ToLower(meta.ConversationID)]; ok {
 			return decision{blocked: true, code: "conversation_blocked", detail: "conversation id is blocked"}
 		}
+	}
+	if isContentScanExempt(r) {
+		return decision{}
 	}
 	if len(body) == 0 || !requestBodyShouldBeRead(r) {
 		return decision{}
@@ -306,6 +368,29 @@ func (p policy) ipBlocked(rawIP string) bool {
 	return false
 }
 
+// isContentScanExempt skips body content scanning for admin / webui / health
+// paths. IP and conversation-id blocking still apply globally; only the
+// keyword/regex/jailbreak scan is bypassed so operators cannot lock themselves
+// out by configuring a banned word that legitimately appears in their own
+// settings payload.
+func isContentScanExempt(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	path := r.URL.Path
+	switch {
+	case path == "/healthz", path == "/readyz":
+		return true
+	case path == "/admin", strings.HasPrefix(path, "/admin/"):
+		return true
+	case path == "/webui", strings.HasPrefix(path, "/webui/"):
+		return true
+	case strings.HasPrefix(path, "/static/"), strings.HasPrefix(path, "/assets/"):
+		return true
+	}
+	return false
+}
+
 func extractRequestText(body []byte) string {
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
@@ -326,16 +411,12 @@ func collectText(out *strings.Builder, value any, depth int) {
 	case string:
 		appendText(out, v)
 	case map[string]any:
-		for key, item := range v {
-			key = strings.ToLower(strings.TrimSpace(key))
-			switch key {
-			case "content", "text", "input", "prompt", "query", "instructions", "system", "messages", "contents", "parts":
-				collectText(out, item, depth+1)
-			default:
-				if depth > 0 {
-					collectText(out, item, depth+1)
-				}
-			}
+		// Recurse into all values so that tool_result / functionResponse /
+		// nested tool blocks are scanned even when their container key is not
+		// in the legacy whitelist. depth + maxCollectedText still bound the
+		// traversal so this is bounded.
+		for _, item := range v {
+			collectText(out, item, depth+1)
 		}
 	case []any:
 		for _, item := range v {

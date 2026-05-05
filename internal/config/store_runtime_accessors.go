@@ -130,6 +130,57 @@ func (s *Store) ChatHistorySQLitePath() string {
 	return resolvePathValue("data/chat_history.sqlite", "data/chat_history.sqlite")
 }
 
+func (s *Store) TokenUsageSQLitePath() string {
+	if raw := strings.TrimSpace(os.Getenv("DEEPSEEK_WEB_TO_API_TOKEN_USAGE_SQLITE_PATH")); raw != "" {
+		return resolvePathValue(raw, "data/token_usage.sqlite")
+	}
+	s.mu.RLock()
+	dataDir := s.cfg.Storage.DataDir
+	configured := s.cfg.Storage.TokenUsageSQLitePath
+	s.mu.RUnlock()
+	if strings.TrimSpace(configured) != "" {
+		return resolvePathValue(configured, "data/token_usage.sqlite")
+	}
+	if strings.TrimSpace(dataDir) != "" {
+		return filepath.Join(resolvePathValue(dataDir, "data"), "token_usage.sqlite")
+	}
+	return TokenUsageSQLitePath()
+}
+
+func (s *Store) SafetyWordsSQLitePath() string {
+	if raw := strings.TrimSpace(os.Getenv("DEEPSEEK_WEB_TO_API_SAFETY_WORDS_SQLITE_PATH")); raw != "" {
+		return resolvePathValue(raw, "data/safety_words.sqlite")
+	}
+	s.mu.RLock()
+	dataDir := s.cfg.Storage.DataDir
+	configured := s.cfg.Storage.SafetyWordsSQLitePath
+	s.mu.RUnlock()
+	if strings.TrimSpace(configured) != "" {
+		return resolvePathValue(configured, "data/safety_words.sqlite")
+	}
+	if strings.TrimSpace(dataDir) != "" {
+		return filepath.Join(resolvePathValue(dataDir, "data"), "safety_words.sqlite")
+	}
+	return SafetyWordsSQLitePath()
+}
+
+func (s *Store) SafetyIPsSQLitePath() string {
+	if raw := strings.TrimSpace(os.Getenv("DEEPSEEK_WEB_TO_API_SAFETY_IPS_SQLITE_PATH")); raw != "" {
+		return resolvePathValue(raw, "data/safety_ips.sqlite")
+	}
+	s.mu.RLock()
+	dataDir := s.cfg.Storage.DataDir
+	configured := s.cfg.Storage.SafetyIPsSQLitePath
+	s.mu.RUnlock()
+	if strings.TrimSpace(configured) != "" {
+		return resolvePathValue(configured, "data/safety_ips.sqlite")
+	}
+	if strings.TrimSpace(dataDir) != "" {
+		return filepath.Join(resolvePathValue(dataDir, "data"), "safety_ips.sqlite")
+	}
+	return SafetyIPsSQLitePath()
+}
+
 func (s *Store) RawStreamSampleRoot() string {
 	if raw := strings.TrimSpace(os.Getenv("DEEPSEEK_WEB_TO_API_RAW_STREAM_SAMPLE_ROOT")); raw != "" {
 		return resolvePathValue(raw, "tests/raw_stream_samples")
