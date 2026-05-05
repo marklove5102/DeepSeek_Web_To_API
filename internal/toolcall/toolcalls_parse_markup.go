@@ -207,13 +207,14 @@ func findMatchingXMLEndTagOutsideCDATA(text, tag string, from int) (closeStart, 
 }
 
 func skipXMLIgnoredSection(lower string, i int) (next int, advanced bool, blocked bool) {
-	switch {
-	case strings.HasPrefix(lower[i:], "<![cdata["):
-		end := strings.Index(lower[i+len("<![cdata["):], "]]>")
+	if openerLen := cdataOpenerByteLenAt(lower, i); openerLen > 0 {
+		end := strings.Index(lower[i+openerLen:], "]]>")
 		if end < 0 {
 			return 0, false, true
 		}
-		return i + len("<![cdata[") + end + len("]]>"), true, false
+		return i + openerLen + end + len("]]>"), true, false
+	}
+	switch {
 	case strings.HasPrefix(lower[i:], "<!--"):
 		end := strings.Index(lower[i+len("<!--"):], "-->")
 		if end < 0 {

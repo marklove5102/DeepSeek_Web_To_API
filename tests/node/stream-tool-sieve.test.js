@@ -57,6 +57,36 @@ test('parseToolCalls parses DSML shell as XML-compatible tool call', () => {
   assert.deepEqual(calls[0].input, { path: 'README.MD' });
 });
 
+test('parseToolCalls tolerates pipe-variant CDATA opener (DeepSeek emission)', () => {
+  // Real-world: DeepSeek bleeds the surrounding <|DSML|...|> pipe convention
+  // into the CDATA opener, producing <![CDATA|VALUE]]> rather than <![CDATA[VALUE]]>.
+  // Without tolerance, Claude Code's progress UI displays the wrapper verbatim.
+  const cases = [
+    {
+      label: 'ascii pipe opener only',
+      payload: '<|DSML|tool_calls><|DSML|invoke name="Agent"><|DSML|parameter name="subagent_type"><![CDATA|general-purpose]]></|DSML|parameter></|DSML|invoke></|DSML|tool_calls>',
+    },
+    {
+      label: 'ascii pipes both ends',
+      payload: '<|DSML|tool_calls><|DSML|invoke name="Agent"><|DSML|parameter name="subagent_type"><![CDATA|general-purpose|]]></|DSML|parameter></|DSML|invoke></|DSML|tool_calls>',
+    },
+    {
+      label: 'fullwidth pipe opener',
+      payload: '<|DSML|tool_calls><|DSML|invoke name="Agent"><|DSML|parameter name="subagent_type"><![CDATA｜general-purpose]]></|DSML|parameter></|DSML|invoke></|DSML|tool_calls>',
+    },
+  ];
+  for (const tc of cases) {
+    const calls = parseToolCalls(tc.payload, ['Agent']);
+    assert.equal(calls.length, 1, `${tc.label}: expected 1 call`);
+    assert.equal(calls[0].name, 'Agent', `${tc.label}: tool name`);
+    assert.deepEqual(
+      calls[0].input,
+      { subagent_type: 'general-purpose' },
+      `${tc.label}: subagent_type leaked CDATA wrapper: got ${JSON.stringify(calls[0].input)}`
+    );
+  }
+});
+
 test('parseToolCalls tolerates tokenized DSML prefix separators', () => {
   const prefix = '\uff5cDSML\u200d\u2581';
   const payload = [

@@ -9,8 +9,15 @@ import (
 
 var toolCallMarkupKVPattern = regexp.MustCompile(`(?is)<(?:[a-z0-9_:-]+:)?([a-z0-9_\-.]+)\b[^>]*>(.*?)</(?:[a-z0-9_:-]+:)?([a-z0-9_\-.]+)>`)
 
-// cdataPattern matches a standalone CDATA section.
+// cdataPattern matches a canonical standalone CDATA section.
 var cdataPattern = regexp.MustCompile(`(?is)^<!\[CDATA\[(.*?)]]>$`)
+
+// cdataPipeVariantPattern matches a near-miss where the model substituted the
+// canonical '[' opener with a DSML-style pipe ('|' / '｜'). The trailing pipe
+// before the canonical "]]>" close is optional. Real-world emission example:
+// "<![CDATA|general-purpose]]>" — produced by DeepSeek when the model bleeds
+// the surrounding "<|DSML|...|>" pipe convention into the CDATA opener.
+var cdataPipeVariantPattern = regexp.MustCompile(`(?is)^<!\[CDATA[\|｜](.*?)[\|｜]?]]>$`)
 
 func parseMarkupKVObject(text string) map[string]any {
 	matches := toolCallMarkupKVPattern.FindAllStringSubmatch(strings.TrimSpace(text), -1)
@@ -111,10 +118,56 @@ func extractStandaloneCDATA(inner string) (string, bool) {
 	if cdataMatches := cdataPattern.FindStringSubmatch(trimmed); len(cdataMatches) >= 2 {
 		return cdataMatches[1], true
 	}
-	if strings.HasPrefix(strings.ToLower(trimmed), "<![cdata[") {
+	if cdataMatches := cdataPipeVariantPattern.FindStringSubmatch(trimmed); len(cdataMatches) >= 2 {
+		return cdataMatches[1], true
+	}
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, "<![cdata[") {
 		return trimmed[len("<![CDATA["):], true
 	}
+	if openLen := cdataPipeOpenerByteLen(trimmed); openLen > 0 {
+		return trimmed[openLen:], true
+	}
 	return "", false
+}
+
+// cdataPipeOpenerByteLen returns the byte length of a pipe-variant CDATA opener
+// at the start of trimmed (case-insensitive on the literal "<![CDATA" prefix),
+// or 0 if no such opener is present. Accepts ASCII '|' (1 byte) and full-width
+// '｜' (U+FF5C, 3 bytes in UTF-8) immediately after "<![CDATA".
+func cdataPipeOpenerByteLen(trimmed string) int {
+	const ascii = "<![CDATA|"
+	const wide = "<![CDATA｜"
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, ascii) {
+		return len(ascii)
+	}
+	if strings.HasPrefix(lower, wide) {
+		return len(wide)
+	}
+	return 0
+}
+
+// cdataOpenerByteLenAt returns the byte length of any accepted CDATA opener
+// starting exactly at position i within lower (already lowercased). Accepts
+// canonical "<![CDATA[" and pipe-variant "<![CDATA|" / "<![CDATA｜". Returns 0
+// when no opener begins at i.
+func cdataOpenerByteLenAt(lower string, i int) int {
+	if i < 0 || i >= len(lower) {
+		return 0
+	}
+	const canonical = "<![cdata["
+	const ascii = "<![cdata|"
+	const wide = "<![cdata｜"
+	switch {
+	case strings.HasPrefix(lower[i:], canonical):
+		return len(canonical)
+	case strings.HasPrefix(lower[i:], ascii):
+		return len(ascii)
+	case strings.HasPrefix(lower[i:], wide):
+		return len(wide)
+	}
+	return 0
 }
 
 func parseJSONLiteralValue(raw string) (any, bool) {

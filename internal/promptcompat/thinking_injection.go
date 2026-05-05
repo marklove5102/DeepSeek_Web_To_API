@@ -6,7 +6,21 @@ const (
 	ThinkingInjectionMarker        = "Reasoning Effort: Absolute maximum with no shortcuts permitted."
 	DefaultThinkingInjectionPrompt = ThinkingInjectionMarker + "\n" +
 		"You MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\n" +
-		"Explicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked."
+		"Explicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.\n" +
+		"\n" +
+		"Tool-Chain Discipline — read this before every tool decision:\n" +
+		"1. CALL a tool only when you need information you do not have or an action on an external resource (file, command, API, search). Never guess a value you could read.\n" +
+		"2. FORMAT — strict, no improvisation. Every tool call uses the canonical wrapper:\n" +
+		"   <|DSML|tool_calls>\n" +
+		"     <|DSML|invoke name=\"TOOL_NAME\">\n" +
+		"       <|DSML|parameter name=\"ARG\"><![CDATA[VALUE]]></|DSML|parameter>\n" +
+		"     </|DSML|invoke>\n" +
+		"   </|DSML|tool_calls>\n" +
+		"   The wrapper tags use pipes ('<|DSML|...|>') but CDATA uses SQUARE BRACKETS ('<![CDATA[' and ']]>'). Mixing the two — emitting '<![CDATA|VALUE|]]>' or '<![CDATA|VALUE]]>' — is INVALID; the wrapper will leak into the parameter value and surface verbatim in the client UI.\n" +
+		"3. PARALLEL vs SEQUENTIAL — when multiple calls are independent (no call's input depends on another's output) emit them inside the SAME <|DSML|tool_calls> block so they run concurrently. When a call needs a prior call's result, emit the dependent call only AFTER reading that result.\n" +
+		"4. AFTER A RESULT — read it carefully, then choose ONE: (a) chain a follow-up tool call, or (b) produce the final answer. Diagnose tool errors at the root cause; do NOT blindly retry the same call with the same arguments. If the same call has failed twice, halt the chain and explain, do not attempt a third identical retry.\n" +
+		"5. STOP — terminate the tool chain as soon as the user's request is fully satisfied. Do not invoke extra tools as filler, do not loop. The final response must be prose addressed to the user, NOT another tool-calls block.\n" +
+		"6. FAILURE MODES TO AVOID — wrapping tool-call XML inside markdown code fences; mixing prose and tool-call markup in the same emission; inventing tool names or parameter names absent from the schema; passing the wrong parameter shape (string where object is expected, etc.); silently swallowing a tool error and proceeding as if it succeeded."
 )
 
 func AppendThinkingInjectionToLatestUser(messages []any) ([]any, bool) {
