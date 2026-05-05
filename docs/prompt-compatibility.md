@@ -22,7 +22,15 @@
 
 ## 简介
 
-本文是仓库内 “API 请求 -> DeepSeek Web 纯文本上下文” 的权威文档。OpenAI、Claude、Gemini 的请求形态不同，但进入 DeepSeek Web 前都需要归一化为统一的标准请求，再构造出系统指令、历史消息、工具说明、文件引用和当前用户输入。
+本文是仓库内 “API 请求 → DeepSeek Web 纯文本上下文” 的权威文档。OpenAI、Claude、Gemini 的请求形态不同，但进入 DeepSeek Web 前都需要归一化为统一的标准请求，再构造出系统指令、历史消息、工具说明、文件引用和当前用户输入。
+
+> **v1.0.5 ~ v1.0.12 关键变更（按版本顺序）**
+>
+> - **v1.0.5**：Anthropic `mcp_servers` 字段不再被静默丢弃。`expandMCPServersAsTools` 把 `tool_configuration.allowed_tools` 与 `mcp_servers[].tools[]` 展开为 `<server>.<tool>` 命名的虚拟工具描述，注入到 `tools[]`，让模型在 system prompt 中可见。
+> - **v1.0.5**：违禁屏蔽 `collectText` 取消顶层白名单限制，递归扫描所有 map 字段（覆盖 `tool_result` / `functionResponse` 等容器字段）；`/admin /webui /healthz /readyz /static/ /assets/` 路径豁免内容扫描。
+> - **v1.0.7**：DeepSeek 私有 token 渗漏清理增强（全角斜杠 `／`、未闭合 DSML 残片、`<|end_of_..|...>` trailing pipe），覆盖 OpenAI/Claude/Gemini 四条产物路径。
+> - **v1.0.9**：附件**改内联模式**——`current_input_file.go` 的 `ApplyCurrentInputFile` 不再调上游 `upload_file`（避免账号速率限制），而是把 transcript 直接拼到 user 消息内容里；`file_inline_upload.go` 的 `tryUploadBlock` 同理用 `inlineFileTextReplacement` 把文本类 mime 直接展开、二进制类用占位符。开关由 `server.remote_file_upload_enabled` / env `DEEPSEEK_WEB_TO_API_REMOTE_FILE_UPLOAD_ENABLED` 控制（默认 `false`）。
+> - **v1.0.12**：Codex Responses API 的 `compaction` / `reasoning` input item 在 `responses_input_items.go` 静默跳过（返回 `nil`，不会被误当作 user content 进入 prompt）。
 
 **章节来源**
 - [AGENTS.md](file://AGENTS.md)

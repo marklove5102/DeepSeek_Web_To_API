@@ -4,6 +4,20 @@
 
 本次发布把 v1.0.4 ~ v1.0.12 期间的所有修复与新功能整合回 v1.0.3 版本号下，便于 CNB 主分支保留单一版本里程碑。下面按子段保留每次迭代的明细，方便审计。
 
+### 子段 v1.0.3 增量（文档与 Claude Code）
+
+- **Claude Code v2.x 错误码补全**：[`internal/httpapi/claude/handler_errors.go`](internal/httpapi/claude/handler_errors.go) 的 `claudeErrorCode()` 新增 `case 529: code = "overloaded_error"`。Anthropic 用 HTTP 529 表示上游 overloaded，Claude Code 客户端的官方 retry / back-off 路径 keys on `code: "overloaded_error"`；之前没显式映射会落到 `invalid_request`，导致客户端不重试。
+- **新增 Claude Code v2.x 专题调研**：[`docs/client-compat/claude-code.md`](docs/client-compat/claude-code.md)（643 行 / ~4000 字）覆盖请求体 `system` 数组形态、`betas` 完整列表（v2.1.68 → v2.1.69+ 版本差异）、`cache_control.scope: "turn"`、`mcp_servers` 双格式（`mcp-client-2025-04-04` vs `mcp-client-2025-11-20`）、流式事件序列、错误信封、count_tokens、Task 子代理、thinking 与 tool_use 顺序等 11 个维度，末尾 P0/P1/P2 清单已逐项标注 ds2api 实现状态。
+- **客户端兼容总索引**：新建 [`docs/client-compat/README.md`](docs/client-compat/README.md)，集中索引 5 份客户端报告（Codex / OpenCode / OpenClaw / Cherry Studio / Claude Code），按"已实现 / P1 待实现 / P2 待实现"三栏汇总跨客户端的 ds2api 适配项。
+- **顶层文档同步刷新**：
+  - [`docs/README.md`](docs/README.md)：导航补 client-compat 与 claude-code.md 链接，反映 v1.0.5 ~ v1.0.12 所有新功能。
+  - [`docs/storage-cache.md`](docs/storage-cache.md)：从 2 个 SQLite 文件扩写为 5 套独立 SQLite（accounts / chat_history / token_usage / safety_words / safety_ips），含每套 schema、迁移路径、性能与故障排查；TTL 默认值更新为 30 min / 24 h。
+  - [`docs/security.md`](docs/security.md)：补 v1.0.5 路径豁免 + 越狱默认开 + v1.0.8 localStorage 迁移 + v1.0.9 file upload 内联 + v1.0.11 安全策略 SQLite 拆分 + 敏感字段保护提醒。
+  - [`docs/configuration.md`](docs/configuration.md)：缓存默认值表更新；新增"存储路径"和"服务器开关"两小节；明确 `.env` CONFIG_JSON 单引号明文形态。
+  - [`docs/prompt-compatibility.md`](docs/prompt-compatibility.md) / [`docs/toolcall-semantics.md`](docs/toolcall-semantics.md) / [`docs/deployment.md`](docs/deployment.md)：各加 v1.0.5 ~ v1.0.12 关键变更段，方便老用户对照升级。
+
+
+
 ### 子段 v1.0.12
 
 ### 性能 / 运维

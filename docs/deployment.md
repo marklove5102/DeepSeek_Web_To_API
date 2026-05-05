@@ -24,6 +24,14 @@
 
 DeepSeek_Web_To_API 支持源码运行、二进制运行、Docker Compose 和 GitHub Release/GHCR 镜像发布。生产部署推荐使用二进制或 Docker，并放在 Caddy/Nginx 等反代后面。
 
+> **v1.0.6 ~ v1.0.12 部署侧变更**
+>
+> - **v1.0.6 Pro 模型 120s 超时已修**：`cmd/DeepSeek_Web_To_API/main.go` 的 `http.Server.{ReadTimeout,WriteTimeout}` 改用 `Store.HTTPTotalTimeout()`（默认 7200s）。CF 套餐自身 100s 限制由 CF 控制，本服务无法绕过；流式调用首字节秒级返回不会触发 CF 524，非流式 + 长推理建议改流式或升级 CF Business+。
+> - **v1.0.8 WebUI 刷新 401 已修**：管理台 JWT 从 `sessionStorage` 改存 `localStorage`（避免 Firefox 硬刷新或部分浏览器恢复标签页清空 token），同时保留 sessionStorage → localStorage 自动迁移以平滑升级旧用户。
+> - **v1.0.9 文件上传速率限制已根除**：`server.remote_file_upload_enabled = false`（默认），inline file 与 history transcript 都内联到对话上下文，不再调上游 `upload_file`。生产抽样显示之前 2 小时 4116 次 `upload_file failed` → 升级后 0 次。如有账号配额冗余想恢复上传，设置 `DEEPSEEK_WEB_TO_API_REMOTE_FILE_UPLOAD_ENABLED=true`。
+> - **v1.0.11 5 套独立 SQLite 布局**：`data/{accounts,chat_history,token_usage,safety_words,safety_ips}.sqlite` 各自独立，可单独备份/轮转。
+> - **v1.0.12 缓存 TTL 调长**：内存 5 min → 30 min，磁盘 4 h → 24 h。客户端兼容增强：`/api/messages` 路由别名、`/v1/responses/compact` 501 stub、Codex `compaction` input 容忍。
+
 **章节来源**
 - [Dockerfile](file://Dockerfile)
 - [docker-compose.yml](file://docker-compose.yml)

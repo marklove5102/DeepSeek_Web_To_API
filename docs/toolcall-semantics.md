@@ -24,6 +24,15 @@
 
 工具调用语义的目标是兼容用户客户端的多种工具请求和模型输出形态，同时尽量避免把工具标签泄漏到普通文本。当前实现支持 DSML、XML、JSON 片段和流式筛分，Go 与 Node 侧保持语义对齐。
 
+> **v1.0.5 ~ v1.0.12 关键变更**
+>
+> - **v1.0.7 流式提前 finalize**：`internal/httpapi/openai/chat/chat_stream_runtime.go` 的 `onParsed` 在 `evt.ToolCalls` 完整封闭并 `sendDelta` 后立即返回 `Stop: true, StopReason: HandlerRequested`，触发 `finalize()` 走标准 `finish_reason="tool_calls"` + `[DONE]` 路径。修复了上游 DeepSeek 偶发不发 `[DONE]` + 客户端 ctx 取消同时发生时走 `engine.contextDone()` 早退导致客户端读到工具块但拿不到 finish 帧的概率断流。
+> - **v1.0.7 token 渗漏清理增强**：`internal/httpapi/openai/shared/leaked_output_sanitize.go` 三个新模式：
+>   - `leakedToolResultStartMarkerPattern` / `leakedToolResultEndMarkerPattern` / `leakedMetaMarkerPattern` 尾部斜杠 `/?` → `[/／]?`，覆盖 `<｜Tool／>` 全角斜杠形态。
+>   - `leakedDSMLMarkupFragmentPattern`（`(?im)` 多行模式）：清理 sieve 失败时残留的 `<|tool_calls`、`<|DSML|invoke ...>`、`</|DSML|parameter>` 等已知 token 关键字开头的孤立片段（行尾或 `>` 收尾）。
+>   - `leakedTrailingPipeTagPattern`：处理 `<|end_of_tool_result|tool_use_error: ...` 这类两个 `|` 之间夹文本无 `>` 收尾的形态。
+> - **v1.0.5 MCP 适配**：`expandMCPServersAsTools` 把 Anthropic `mcp_servers[]` 字段中的 `tool_configuration.allowed_tools` 展平为 `<server>.<tool>` 命名虚拟工具，让模型按标准 `tool_use` 块输出供客户端 SDK 调度。详见 [docs/client-compat/claude-coding-clients.md](file://docs/client-compat/claude-coding-clients.md) §6 与 [docs/client-compat/claude-code.md](file://docs/client-compat/claude-code.md)。
+
 **章节来源**
 - [internal/toolcall/toolcalls_parse.go](file://internal/toolcall/toolcalls_parse.go)
 - [internal/toolstream/tool_sieve_core.go](file://internal/toolstream/tool_sieve_core.go)

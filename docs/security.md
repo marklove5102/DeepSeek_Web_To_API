@@ -8,6 +8,8 @@
 - [internal/httpapi/requestbody/json_utf8.go](file://internal/httpapi/requestbody/json_utf8.go)
 - [internal/config/store.go](file://internal/config/store.go)
 - [internal/chathistory/sqlite_write.go](file://internal/chathistory/sqlite_write.go)
+- [internal/requestguard/guard.go](file://internal/requestguard/guard.go)
+- [internal/safetystore/store.go](file://internal/safetystore/store.go)
 </cite>
 
 ## 目录
@@ -22,7 +24,14 @@
 
 ## 简介
 
-本文记录当前安全边界：业务 API 使用 API Key 或直通 token，管理台使用 Admin Key 或 JWT，运行时拒绝缺失管理凭据和 JWT secret 的启动配置。请求入口包含 CORS、安全响应头、panic 恢复和 JSON UTF-8 校验。
+本文记录当前安全边界：
+
+- **管理台凭据**：必须显式配置 `admin.key`/`admin.password_hash` 与 `admin.jwt_secret`；缺一拒绝启动。
+- **业务鉴权**：API Key 进入托管账号池；未知 token 进入直通模式；恶意直通 token 短期负缓存（10 分钟，最多 4096 个 callerID）。
+- **管理台 JWT**：HS256 签名 + `jwt_valid_after_unix` 截断旧 token；**v1.0.8 起从 sessionStorage 改存 localStorage**，避免硬刷新清空会话产生 `{"detail":"authentication required"}` 假阳性。
+- **请求安全策略**（`internal/requestguard`）：IP/CIDR 黑名单 + 会话 ID 黑名单 + 违禁字面量 + 违禁正则 + 越狱模式拦截。**v1.0.11 起违禁列表与 IP 黑白名单从 `config.SafetyConfig` 拆分到独立 SQLite**（`safety_words.sqlite` + `safety_ips.sqlite`），admin 写入时双源镜像。
+- **请求入口**：CORS + 安全响应头 + panic 恢复 + JSON UTF-8 校验 + 请求体大小限制（默认 64 MB 扫描上限 + 100 MB JSON / multipart 上限）。
+- **数据落盘**：账号 token 不入 `config.json`（保存时主动清空），历史详情 gzip + 解压上限保护，敏感文件权限 0600。
 
 **章节来源**
 - [internal/auth/admin.go](file://internal/auth/admin.go)
@@ -65,11 +74,23 @@ CONFIG --> SQLITE
 ## 核心组件
 
 - 管理端启动校验：缺少 `admin.key`/`admin.password_hash` 或 `admin.jwt_secret` 时拒绝启动。
-- Admin JWT：HS256 签名，包含 `iat`、`exp` 和 `role=admin`，支持 `jwt_valid_after_unix` 使旧 token 失效。
-- 业务鉴权：配置 API Key 进入托管账号池，未知 token 进入直通模式。
+- Admin JWT：HS256 签名，包含 `iat`、`exp` 和 `role=admin`；支持 `jwt_valid_after_unix` 使旧 token 失效；**v1.0.8 改 localStorage 持久化** + 旧 sessionStorage 自动迁移。
+- 业务鉴权：配置 API Key 进入托管账号池，未知 token 进入直通模式；直连失败 token 短期负缓存。
+- 请求守卫（`internal/requestguard`）：
+  - **IP 黑名单**：精确 IP + CIDR 段，对所有路径生效。
+  - **会话 ID 黑名单**：根据 `requestmeta.ConversationID` 命中拦截。
+  - **内容扫描**：违禁字面量（`strings.Contains` 大小写不敏感）、违禁正则、越狱模式（默认 18 条 + 用户自定义）。
+  - **递归扫描**（v1.0.5 起）：所有 map 字段值（不仅顶层白名单键），覆盖 `tool_result` / `functionResponse` 等容器字段。
+  - **路径豁免**（v1.0.5 起）：`/admin /webui /healthz /readyz /static/ /assets/` 跳过内容扫描（IP / 会话拦截仍生效），避免管理员配置含违禁词时被自身策略锁死。
+  - **越狱默认开**（v1.0.5 起）：`safety.enabled=true` 而 `jailbreak.enabled` 未显式设置时，越狱检测默认启用。
+- 安全策略列表（v1.0.11 起独立 SQLite）：
+  - `safety_words.sqlite` 表 `banned_entries(kind, value)`，kind ∈ `{content, regex, jailbreak}`。
+  - `safety_ips.sqlite` 表 `blocked_ips` / `allowed_ips`（白名单预留）/ `blocked_conversation_ids`。
+  - 启动时从 `config.SafetyConfig` 一次性迁移；admin 保存时镜像双写；运行时 `policyCache.load` 把两源 union 后交给 `buildPolicy`。
 - CORS：允许主流 SDK 请求头，屏蔽内部专用头。
 - 安全响应头：`nosniff`、`DENY`、`no-referrer`、权限策略和同源资源策略。
-- SQLite 写入：使用参数化查询，不使用字符串拼接 SQL。
+- 文件上传防护（v1.0.9 起）：默认 `server.remote_file_upload_enabled = false`，inline 文件直接转文本注入，不调用上游 `upload_file`（避免账号级速率限制）；`/v1/files` 端点保留供主动上传场景。
+- SQLite 写入：参数化查询，不使用字符串拼接 SQL。
 
 **章节来源**
 - [internal/auth/admin.go](file://internal/auth/admin.go)
@@ -120,7 +141,13 @@ Handler-->>Client: response
 
 ### 数据落盘
 
-配置保存时会清理账号运行时 token。历史记录写入 SQLite，并对详情进行 gzip 压缩；但历史内容本身可能包含用户输入，因此部署时应保护 `data/` 目录权限和备份介质。
+配置保存时清理账号运行时 token；账号库（`accounts.sqlite`）独立于 `config.json`，目录权限 0700。历史记录写入 SQLite + gzip 详情；**v1.0.6 起新增 `request_ip` / `conversation_id` 两列**用于审计；启动迁移自动 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`。
+
+历史内容本身可能包含用户输入；部署时应保护 `data/` 目录权限和备份介质。**敏感字段提醒**：
+
+- `accounts.sqlite` 包含**明文 password 与 token**（无加密），仅靠目录 0700 防护。如需加密静默存储，需在 [improvement plan](#) 跟踪改造（参见 1.0.x 安全审计报告）。
+- `chat_history.sqlite` 包含完整 user 消息、`final_prompt`、`reasoning_content`、`request_ip`，无字段级脱敏。如有合规要求，建议把 `chat_history.limit` 配置为 0（禁用历史）或缩短保留窗口。
+- `safety_words.sqlite` / `safety_ips.sqlite` 含运维侧违禁词与黑名单 IP 列表，敏感度低于账号库，但仍应同 `data/` 整体保护。
 
 **章节来源**
 - [internal/config/store.go](file://internal/config/store.go)
