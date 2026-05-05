@@ -202,6 +202,44 @@ func TestDetermineWithSessionHeaderScopeOverridesBodyFingerprint(t *testing.T) {
 	}
 }
 
+func TestDetermineWithSessionUsesToolchainConversationHeader(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{
+		"keys":["managed-key"],
+		"accounts":[
+			{"email":"acc1@example.com","password":"pwd","token":"token-1"},
+			{"email":"acc2@example.com","password":"pwd","token":"token-2"}
+		],
+		"runtime":{"account_max_inflight":8}
+	}`)
+	store := config.LoadStore()
+	pool := account.NewPool(store)
+	resolver := NewResolver(store, pool, func(_ context.Context, acc config.Account) (string, error) {
+		return acc.Token, nil
+	})
+
+	req1, _ := http.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req1.Header.Set("x-api-key", "managed-key")
+	req1.Header.Set("X-Codex-Session-ID", "codex-conv-1")
+	a1, err := resolver.DetermineWithSession(req1, []byte(`{"messages":[{"role":"user","content":"first"}]}`))
+	if err != nil {
+		t.Fatalf("first determine failed: %v", err)
+	}
+	defer resolver.Release(a1)
+
+	req2, _ := http.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req2.Header.Set("x-api-key", "managed-key")
+	req2.Header.Set("X-Codex-Session-ID", "codex-conv-1")
+	a2, err := resolver.DetermineWithSession(req2, []byte(`{"messages":[{"role":"user","content":"second"}]}`))
+	if err != nil {
+		t.Fatalf("second determine failed: %v", err)
+	}
+	defer resolver.Release(a2)
+
+	if a2.AccountID != a1.AccountID {
+		t.Fatalf("expected conversation-bound account %q, got %q", a1.AccountID, a2.AccountID)
+	}
+}
+
 func TestDetermineWithSessionDifferentHeaderScopesDistributeAccounts(t *testing.T) {
 	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{
 		"keys":["managed-key"],

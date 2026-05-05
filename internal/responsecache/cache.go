@@ -45,6 +45,7 @@ type Options struct {
 	MaxBody        int64
 	MemoryMaxBytes int64
 	DiskMaxBytes   int64
+	SemanticKey    bool
 	OnHit          HitFunc
 }
 
@@ -66,6 +67,7 @@ type Cache struct {
 	items          map[string]memoryEntry
 	lastDiskSweep  time.Time
 	onHit          HitFunc
+	semanticKey    bool
 }
 
 type Entry struct {
@@ -92,6 +94,22 @@ type diskRecord struct {
 }
 
 func New(opts Options) *Cache {
+	opts = normalizeOptions(opts)
+	return &Cache{
+		dir:            opts.Dir,
+		memoryTTL:      opts.MemoryTTL,
+		diskTTL:        opts.DiskTTL,
+		maxBody:        opts.MaxBody,
+		memoryMaxBytes: opts.MemoryMaxBytes,
+		diskMaxBytes:   opts.DiskMaxBytes,
+		uncacheable:    map[string]int64{},
+		items:          map[string]memoryEntry{},
+		onHit:          opts.OnHit,
+		semanticKey:    opts.SemanticKey,
+	}
+}
+
+func normalizeOptions(opts Options) Options {
 	memoryTTL := opts.MemoryTTL
 	if memoryTTL <= 0 {
 		memoryTTL = defaultMemoryTTL
@@ -116,17 +134,37 @@ func New(opts Options) *Cache {
 	if dir == "" {
 		dir = config.ResponseCacheDir()
 	}
-	return &Cache{
-		dir:            filepath.Clean(dir),
-		memoryTTL:      memoryTTL,
-		diskTTL:        diskTTL,
-		maxBody:        maxBody,
-		memoryMaxBytes: memoryMaxBytes,
-		diskMaxBytes:   diskMaxBytes,
-		uncacheable:    map[string]int64{},
-		items:          map[string]memoryEntry{},
-		onHit:          opts.OnHit,
+	opts.Dir = filepath.Clean(dir)
+	opts.MemoryTTL = memoryTTL
+	opts.DiskTTL = diskTTL
+	opts.MaxBody = maxBody
+	opts.MemoryMaxBytes = memoryMaxBytes
+	opts.DiskMaxBytes = diskMaxBytes
+	return opts
+}
+
+func (c *Cache) ApplyOptions(opts Options) {
+	if c == nil {
+		return
 	}
+	opts = normalizeOptions(opts)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.dir = opts.Dir
+	c.memoryTTL = opts.MemoryTTL
+	c.diskTTL = opts.DiskTTL
+	c.maxBody = opts.MaxBody
+	c.memoryMaxBytes = opts.MemoryMaxBytes
+	c.diskMaxBytes = opts.DiskMaxBytes
+	c.semanticKey = opts.SemanticKey
+	if opts.OnHit != nil {
+		c.onHit = opts.OnHit
+	}
+
+	c.items = map[string]memoryEntry{}
+	c.memoryBytes = 0
+	c.lastDiskSweep = time.Time{}
 }
 
 func (c *Cache) Middleware(resolver CallerResolver) func(http.Handler) http.Handler {
@@ -175,7 +213,7 @@ func (c *Cache) Wrap(resolver CallerResolver, next http.Handler) http.Handler {
 			return
 		}
 
-		key := RequestKey(r, owner, rawBody)
+		key := c.requestKey(r, owner, rawBody)
 		if entry, source, ok := c.Get(key); ok {
 			if c.onHit != nil {
 				c.onHit(r, cloneEntry(entry), source)
@@ -217,9 +255,24 @@ func CacheableRequest(r *http.Request) bool {
 }
 
 func RequestKey(r *http.Request, owner string, body []byte) string {
+	return requestKey(r, owner, body, true)
+}
+
+func (c *Cache) requestKey(r *http.Request, owner string, body []byte) string {
+	if c == nil {
+		return RequestKey(r, owner, body)
+	}
+	return requestKey(r, owner, body, c.semanticKey)
+}
+
+func requestKey(r *http.Request, owner string, body []byte, semanticKey bool) string {
 	h := sha256.New()
-	body = canonicalRequestBodyForKey(r, body)
-	writeKeyPart(h, "v1")
+	body = canonicalRequestBodyForKey(r, body, semanticKey)
+	version := "v1"
+	if semanticKey {
+		version = "v2-semantic"
+	}
+	writeKeyPart(h, version)
 	writeKeyPart(h, strings.TrimSpace(owner))
 	if r != nil {
 		writeKeyPart(h, strings.ToUpper(strings.TrimSpace(r.Method)))
@@ -236,7 +289,7 @@ func RequestKey(r *http.Request, owner string, body []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func canonicalRequestBodyForKey(r *http.Request, body []byte) []byte {
+func canonicalRequestBodyForKey(r *http.Request, body []byte, semanticKey bool) []byte {
 	if len(body) == 0 || !cacheKeyShouldNormalizeJSON(r) {
 		return body
 	}
@@ -250,7 +303,7 @@ func canonicalRequestBodyForKey(r *http.Request, body []byte) []byte {
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return body
 	}
-	value, keep := normalizeCacheKeyJSONValue(value, true)
+	value, keep := normalizeCacheKeyJSONValue(value, true, "", semanticKey)
 	if !keep {
 		return body
 	}
@@ -276,7 +329,7 @@ func isJSONContentType(raw string) bool {
 	return raw == "application/json" || strings.Contains(raw, "+json") || strings.Contains(raw, "/json")
 }
 
-func normalizeCacheKeyJSONValue(value any, topLevel bool) (any, bool) {
+func normalizeCacheKeyJSONValue(value any, topLevel bool, key string, semanticKey bool) (any, bool) {
 	switch v := value.(type) {
 	case map[string]any:
 		if cacheKeyMapShouldDrop(v) {
@@ -284,10 +337,10 @@ func normalizeCacheKeyJSONValue(value any, topLevel bool) (any, bool) {
 		}
 		out := make(map[string]any, len(v))
 		for key, item := range v {
-			if ignoredCacheKeyField(key, topLevel) {
+			if ignoredCacheKeyField(key, topLevel, semanticKey) {
 				continue
 			}
-			normalized, keep := normalizeCacheKeyJSONValue(item, false)
+			normalized, keep := normalizeCacheKeyJSONValue(item, false, key, semanticKey)
 			if !keep {
 				continue
 			}
@@ -297,13 +350,21 @@ func normalizeCacheKeyJSONValue(value any, topLevel bool) (any, bool) {
 	case []any:
 		out := make([]any, 0, len(v))
 		for i := range v {
-			normalized, keep := normalizeCacheKeyJSONValue(v[i], false)
+			normalized, keep := normalizeCacheKeyJSONValue(v[i], false, key, semanticKey)
 			if !keep {
 				continue
 			}
 			out = append(out, normalized)
 		}
 		return out, true
+	case string:
+		if semanticKey && semanticStringKey(key) {
+			return normalizeSemanticString(v), true
+		}
+		if semanticKey && semanticLowerStringKey(key) {
+			return strings.ToLower(strings.TrimSpace(v)), true
+		}
+		return value, true
 	default:
 		return value, true
 	}
@@ -314,10 +375,17 @@ func cacheKeyMapShouldDrop(value map[string]any) bool {
 	return strings.EqualFold(strings.TrimSpace(typ), "cache_edits")
 }
 
-func ignoredCacheKeyField(key string, topLevel bool) bool {
+func ignoredCacheKeyField(key string, topLevel bool, semanticKey bool) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
 	case "cache_control", "cache_reference", "context_management":
 		return true
+	}
+	if semanticKey {
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "id", "call_id", "tool_call_id", "tool_use_id", "message_id", "request_id", "trace_id", "event_id",
+			"conversation_id", "conversationid", "chat_id", "chatid", "thread_id", "threadid", "session_id", "sessionid":
+			return true
+		}
 	}
 	if !topLevel {
 		return false
@@ -328,6 +396,36 @@ func ignoredCacheKeyField(key string, topLevel bool) bool {
 	default:
 		return false
 	}
+}
+
+func semanticStringKey(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "content", "text", "input", "prompt", "query", "instructions", "system":
+		return true
+	default:
+		return false
+	}
+}
+
+func semanticLowerStringKey(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "role", "type":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeSemanticString(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	fields := strings.Fields(raw)
+	if len(fields) <= 1 {
+		return raw
+	}
+	return strings.Join(fields, " ")
 }
 
 func (c *Cache) Get(key string) (Entry, string, bool) {
@@ -1088,11 +1186,13 @@ func (c *Cache) Stats() map[string]any {
 		"memory_items":       len(c.items),
 		"memory_bytes":       c.memoryBytes,
 		"memory_max_bytes":   c.memoryMaxBytes,
+		"max_body_bytes":     c.maxBody,
 		"memory_ttl_seconds": int(c.memoryTTL.Seconds()),
 		"disk_ttl_seconds":   int(c.diskTTL.Seconds()),
 		"disk_max_bytes":     c.diskMaxBytes,
 		"disk_dir":           c.dir,
 		"compression":        "gzip",
+		"semantic_key":       c.semanticKey,
 	}
 	for reason, count := range c.uncacheable {
 		out["uncacheable_"+reason] = count
@@ -1104,5 +1204,5 @@ func (c *Cache) String() string {
 	if c == nil {
 		return "response cache disabled"
 	}
-	return fmt.Sprintf("response cache memory=%s memory_max=%d disk=%s disk_max=%d dir=%s compression=gzip", c.memoryTTL, c.memoryMaxBytes, c.diskTTL, c.diskMaxBytes, c.dir)
+	return fmt.Sprintf("response cache memory=%s memory_max=%d disk=%s disk_max=%d dir=%s compression=gzip semantic_key=%t", c.memoryTTL, c.memoryMaxBytes, c.diskTTL, c.diskMaxBytes, c.dir, c.semanticKey)
 }

@@ -198,6 +198,36 @@ func (s *Store) ResponseCacheDiskMaxBytes() int64 {
 	return s.cfg.Cache.Response.DiskMaxBytes
 }
 
+func (s *Store) ResponseCacheSemanticKey() bool {
+	if raw := strings.TrimSpace(os.Getenv("DEEPSEEK_WEB_TO_API_RESPONSE_CACHE_SEMANTIC_KEY")); raw != "" {
+		return parseBoolDefault(raw, true)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.cfg.Cache.Response.SemanticKey != nil {
+		return *s.cfg.Cache.Response.SemanticKey
+	}
+	return true
+}
+
+func (s *Store) SafetyConfig() SafetyConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cfg := s.cfg.Safety
+	return SafetyConfig{
+		Enabled:                cloneBoolPtr(cfg.Enabled),
+		BlockMessage:           cfg.BlockMessage,
+		BlockedIPs:             append([]string(nil), cfg.BlockedIPs...),
+		BlockedConversationIDs: append([]string(nil), cfg.BlockedConversationIDs...),
+		BannedContent:          append([]string(nil), cfg.BannedContent...),
+		BannedRegex:            append([]string(nil), cfg.BannedRegex...),
+		Jailbreak: JailbreakConfig{
+			Enabled:  cloneBoolPtr(cfg.Jailbreak.Enabled),
+			Patterns: append([]string(nil), cfg.Jailbreak.Patterns...),
+		},
+	}
+}
+
 func resolvePathValue(raw, defaultRel string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

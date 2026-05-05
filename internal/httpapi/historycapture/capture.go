@@ -13,6 +13,8 @@ import (
 	openaifmt "DeepSeek_Web_To_API/internal/format/openai"
 	"DeepSeek_Web_To_API/internal/prompt"
 	"DeepSeek_Web_To_API/internal/promptcompat"
+	"DeepSeek_Web_To_API/internal/requestguard"
+	"DeepSeek_Web_To_API/internal/requestmeta"
 )
 
 const (
@@ -42,16 +44,22 @@ func StartWithStatus(store *chathistory.Store, r *http.Request, a *auth.RequestA
 	if !store.Enabled() || !ShouldCapture(r) {
 		return nil
 	}
+	meta, ok := requestguard.FromContext(r.Context())
+	if !ok {
+		meta = requestmeta.Metadata{ClientIP: requestmeta.ClientIP(r), ConversationID: requestmeta.ConversationID(r, nil)}
+	}
 	startParams := chathistory.StartParams{
-		CallerID:    strings.TrimSpace(a.CallerID),
-		AccountID:   strings.TrimSpace(a.AccountID),
-		Status:      strings.TrimSpace(status),
-		Model:       strings.TrimSpace(stdReq.ResponseModel),
-		Stream:      stdReq.Stream,
-		UserInput:   extractSingleUserInput(stdReq.Messages),
-		Messages:    extractAllMessages(stdReq.Messages),
-		HistoryText: stdReq.HistoryText,
-		FinalPrompt: stdReq.FinalPrompt,
+		CallerID:       strings.TrimSpace(a.CallerID),
+		AccountID:      strings.TrimSpace(a.AccountID),
+		RequestIP:      meta.ClientIP,
+		ConversationID: meta.ConversationID,
+		Status:         strings.TrimSpace(status),
+		Model:          strings.TrimSpace(stdReq.ResponseModel),
+		Stream:         stdReq.Stream,
+		UserInput:      extractSingleUserInput(stdReq.Messages),
+		Messages:       extractAllMessages(stdReq.Messages),
+		HistoryText:    stdReq.HistoryText,
+		FinalPrompt:    stdReq.FinalPrompt,
 	}
 	entry, err := store.Start(startParams)
 	if err != nil && entry.ID == "" {

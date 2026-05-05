@@ -2,6 +2,7 @@ package settings
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"DeepSeek_Web_To_API/internal/config"
@@ -21,16 +22,38 @@ func boolFrom(v any) bool {
 	}
 }
 
-func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *config.RuntimeConfig, *config.CompatConfig, *config.ResponsesConfig, *config.EmbeddingsConfig, *config.AutoDeleteConfig, *config.CurrentInputFileConfig, *config.ThinkingInjectionConfig, map[string]string, error) {
+func int64From(v any) int64 {
+	switch x := v.(type) {
+	case int:
+		return int64(x)
+	case int64:
+		return x
+	case int32:
+		return int64(x)
+	case float64:
+		return int64(x)
+	case float32:
+		return int64(x)
+	case string:
+		n, _ := strconv.ParseInt(strings.TrimSpace(x), 10, 64)
+		return n
+	default:
+		return 0
+	}
+}
+
+func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *config.RuntimeConfig, *config.CompatConfig, *config.ResponsesConfig, *config.EmbeddingsConfig, *config.CacheConfig, *config.AutoDeleteConfig, *config.CurrentInputFileConfig, *config.ThinkingInjectionConfig, *config.SafetyConfig, map[string]string, error) {
 	var (
 		adminCfg        *config.AdminConfig
 		runtimeCfg      *config.RuntimeConfig
 		compatCfg       *config.CompatConfig
 		respCfg         *config.ResponsesConfig
 		embCfg          *config.EmbeddingsConfig
+		cacheCfg        *config.CacheConfig
 		autoDeleteCfg   *config.AutoDeleteConfig
 		currentInputCfg *config.CurrentInputFileConfig
 		thinkingInjCfg  *config.ThinkingInjectionConfig
+		safetyCfg       *config.SafetyConfig
 		aliasMap        map[string]string
 	)
 
@@ -39,7 +62,7 @@ func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *confi
 		if v, exists := raw["jwt_expire_hours"]; exists {
 			n := intFrom(v)
 			if err := config.ValidateIntRange("admin.jwt_expire_hours", n, 1, 720, true); err != nil {
-				return nil, nil, nil, nil, nil, nil, nil, nil, nil, err
+				return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
 			}
 			cfg.JWTExpireHours = n
 		}
@@ -51,33 +74,33 @@ func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *confi
 		if v, exists := raw["account_max_inflight"]; exists {
 			n := intFrom(v)
 			if err := config.ValidateIntRange("runtime.account_max_inflight", n, 1, 256, true); err != nil {
-				return nil, nil, nil, nil, nil, nil, nil, nil, nil, err
+				return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
 			}
 			cfg.AccountMaxInflight = n
 		}
 		if v, exists := raw["account_max_queue"]; exists {
 			n := intFrom(v)
 			if err := config.ValidateIntRange("runtime.account_max_queue", n, 1, 200000, true); err != nil {
-				return nil, nil, nil, nil, nil, nil, nil, nil, nil, err
+				return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
 			}
 			cfg.AccountMaxQueue = n
 		}
 		if v, exists := raw["global_max_inflight"]; exists {
 			n := intFrom(v)
 			if err := config.ValidateIntRange("runtime.global_max_inflight", n, 1, 200000, true); err != nil {
-				return nil, nil, nil, nil, nil, nil, nil, nil, nil, err
+				return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
 			}
 			cfg.GlobalMaxInflight = n
 		}
 		if v, exists := raw["token_refresh_interval_hours"]; exists {
 			n := intFrom(v)
 			if err := config.ValidateIntRange("runtime.token_refresh_interval_hours", n, 1, 720, true); err != nil {
-				return nil, nil, nil, nil, nil, nil, nil, nil, nil, err
+				return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
 			}
 			cfg.TokenRefreshIntervalHours = n
 		}
 		if cfg.AccountMaxInflight > 0 && cfg.GlobalMaxInflight > 0 && cfg.GlobalMaxInflight < cfg.AccountMaxInflight {
-			return nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("runtime.global_max_inflight must be >= runtime.account_max_inflight")
+			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("runtime.global_max_inflight must be >= runtime.account_max_inflight")
 		}
 		runtimeCfg = cfg
 	}
@@ -100,7 +123,7 @@ func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *confi
 		if v, exists := raw["store_ttl_seconds"]; exists {
 			n := intFrom(v)
 			if err := config.ValidateIntRange("responses.store_ttl_seconds", n, 30, 86400, true); err != nil {
-				return nil, nil, nil, nil, nil, nil, nil, nil, nil, err
+				return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
 			}
 			cfg.StoreTTLSeconds = n
 		}
@@ -112,11 +135,63 @@ func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *confi
 		if v, exists := raw["provider"]; exists {
 			p := strings.TrimSpace(fmt.Sprintf("%v", v))
 			if err := config.ValidateTrimmedString("embeddings.provider", p, false); err != nil {
-				return nil, nil, nil, nil, nil, nil, nil, nil, nil, err
+				return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
 			}
 			cfg.Provider = p
 		}
 		embCfg = cfg
+	}
+
+	if raw, ok := req["cache"].(map[string]any); ok {
+		if responseRaw, ok := raw["response"].(map[string]any); ok {
+			cfg := &config.CacheConfig{}
+			if v, exists := responseRaw["dir"]; exists {
+				cfg.Response.Dir = strings.TrimSpace(fmt.Sprintf("%v", v))
+			}
+			if v, exists := responseRaw["memory_ttl_seconds"]; exists {
+				n := intFrom(v)
+				if err := config.ValidateIntRange("cache.response.memory_ttl_seconds", n, 1, 86400, true); err != nil {
+					return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
+				}
+				cfg.Response.MemoryTTLSeconds = n
+			}
+			if v, exists := responseRaw["disk_ttl_seconds"]; exists {
+				n := intFrom(v)
+				if err := config.ValidateIntRange("cache.response.disk_ttl_seconds", n, 1, 604800, true); err != nil {
+					return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
+				}
+				cfg.Response.DiskTTLSeconds = n
+			}
+			if v, exists := responseRaw["max_body_bytes"]; exists {
+				n := int64From(v)
+				if err := config.ValidateInt64Range("cache.response.max_body_bytes", n, 1, 1<<30, true); err != nil {
+					return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
+				}
+				cfg.Response.MaxBodyBytes = n
+			}
+			if v, exists := responseRaw["memory_max_bytes"]; exists {
+				n := int64From(v)
+				if err := config.ValidateInt64Range("cache.response.memory_max_bytes", n, 1, 1<<40, true); err != nil {
+					return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
+				}
+				cfg.Response.MemoryMaxBytes = n
+			}
+			if v, exists := responseRaw["disk_max_bytes"]; exists {
+				n := int64From(v)
+				if err := config.ValidateInt64Range("cache.response.disk_max_bytes", n, 1, 1<<42, true); err != nil {
+					return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
+				}
+				cfg.Response.DiskMaxBytes = n
+			}
+			if v, exists := responseRaw["semantic_key"]; exists {
+				b := boolFrom(v)
+				cfg.Response.SemanticKey = &b
+			}
+			if err := config.ValidateCacheConfig(*cfg); err != nil {
+				return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
+			}
+			cacheCfg = cfg
+		}
 	}
 
 	if raw, ok := req["model_aliases"].(map[string]any); ok {
@@ -138,7 +213,7 @@ func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *confi
 		if v, exists := raw["mode"]; exists {
 			mode := strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", v)))
 			if err := config.ValidateAutoDeleteMode(mode); err != nil {
-				return nil, nil, nil, nil, nil, nil, nil, nil, nil, err
+				return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
 			}
 			if mode == "" {
 				mode = "none"
@@ -160,12 +235,12 @@ func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *confi
 		if v, exists := raw["min_chars"]; exists {
 			n := intFrom(v)
 			if err := config.ValidateIntRange("current_input_file.min_chars", n, 0, 100000000, true); err != nil {
-				return nil, nil, nil, nil, nil, nil, nil, nil, nil, err
+				return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
 			}
 			cfg.MinChars = n
 		}
 		if err := config.ValidateCurrentInputFileConfig(*cfg); err != nil {
-			return nil, nil, nil, nil, nil, nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
 		}
 		currentInputCfg = cfg
 	}
@@ -182,5 +257,66 @@ func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *confi
 		thinkingInjCfg = cfg
 	}
 
-	return adminCfg, runtimeCfg, compatCfg, respCfg, embCfg, autoDeleteCfg, currentInputCfg, thinkingInjCfg, aliasMap, nil
+	if raw, ok := req["safety"].(map[string]any); ok {
+		cfg := &config.SafetyConfig{}
+		if v, exists := raw["enabled"]; exists {
+			b := boolFrom(v)
+			cfg.Enabled = &b
+		}
+		if v, exists := raw["block_message"]; exists {
+			cfg.BlockMessage = strings.TrimSpace(fmt.Sprintf("%v", v))
+		}
+		cfg.BlockedIPs = stringSliceFrom(raw["blocked_ips"])
+		cfg.BlockedConversationIDs = stringSliceFrom(raw["blocked_conversation_ids"])
+		cfg.BannedContent = stringSliceFrom(raw["banned_content"])
+		cfg.BannedRegex = stringSliceFrom(raw["banned_regex"])
+		if jailRaw, ok := raw["jailbreak"].(map[string]any); ok {
+			if v, exists := jailRaw["enabled"]; exists {
+				b := boolFrom(v)
+				cfg.Jailbreak.Enabled = &b
+			}
+			cfg.Jailbreak.Patterns = stringSliceFrom(jailRaw["patterns"])
+		}
+		if err := config.ValidateSafetyConfig(*cfg); err != nil {
+			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
+		}
+		safetyCfg = cfg
+	}
+
+	return adminCfg, runtimeCfg, compatCfg, respCfg, embCfg, cacheCfg, autoDeleteCfg, currentInputCfg, thinkingInjCfg, safetyCfg, aliasMap, nil
+}
+
+func stringSliceFrom(value any) []string {
+	switch v := value.(type) {
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			text := strings.TrimSpace(fmt.Sprintf("%v", item))
+			if text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	case []string:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			text := strings.TrimSpace(item)
+			if text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	case string:
+		lines := strings.FieldsFunc(v, func(r rune) bool { return r == '\n' || r == ',' })
+		out := make([]string, 0, len(lines))
+		for _, item := range lines {
+			text := strings.TrimSpace(item)
+			if text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }

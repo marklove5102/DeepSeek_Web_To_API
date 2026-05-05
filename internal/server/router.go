@@ -28,6 +28,8 @@ import (
 	"DeepSeek_Web_To_API/internal/httpapi/openai/responses"
 	"DeepSeek_Web_To_API/internal/httpapi/openai/shared"
 	"DeepSeek_Web_To_API/internal/httpapi/requestbody"
+	"DeepSeek_Web_To_API/internal/requestguard"
+	"DeepSeek_Web_To_API/internal/requestmeta"
 	"DeepSeek_Web_To_API/internal/responsecache"
 	"DeepSeek_Web_To_API/internal/webui"
 )
@@ -75,6 +77,7 @@ func NewApp() (*App, error) {
 		MaxBody:        store.ResponseCacheMaxBodyBytes(),
 		MemoryMaxBytes: store.ResponseCacheMemoryMaxBytes(),
 		DiskMaxBytes:   store.ResponseCacheDiskMaxBytes(),
+		SemanticKey:    store.ResponseCacheSemanticKey(),
 		OnHit:          responsesHandler.OnProtocolResponseCacheHit,
 	})
 	adminHandler := &admin.Handler{Store: store, Pool: pool, DS: dsClient, OpenAI: chatHandler, ChatHistory: chatHistoryStore, ResponseCache: protocolResponseCache}
@@ -87,6 +90,7 @@ func NewApp() (*App, error) {
 	r.Use(middleware.Recoverer)
 	r.Use(cors)
 	r.Use(securityHeaders)
+	r.Use(requestguard.Middleware(requestguard.Options{Store: store, ChatHistory: chatHistoryStore}))
 	r.Use(requestbody.ValidateJSONUTF8)
 	r.Use(timeout(0))
 	r.Use(protocolResponseCache.Middleware(resolver))
@@ -133,6 +137,7 @@ func NewApp() (*App, error) {
 	claude.RegisterRoutes(r, claudeHandler)
 	gemini.RegisterRoutes(r, geminiHandler)
 	r.Route("/admin", func(ar chi.Router) {
+		ar.Use(adminBrowserNavigationFallback(webuiHandler))
 		admin.RegisterRoutes(ar, adminHandler)
 	})
 	webui.RegisterRoutes(r, webuiHandler)
@@ -144,6 +149,40 @@ func NewApp() (*App, error) {
 	})
 
 	return &App{Store: store, Pool: pool, Resolver: resolver, DS: dsClient, Router: r}, nil
+}
+
+func adminBrowserNavigationFallback(webuiHandler *webui.Handler) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if isAdminBrowserNavigation(r) && webuiHandler.HandleAdminFallback(w, r) {
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func isAdminBrowserNavigation(r *http.Request) bool {
+	if r == nil || r.Method != http.MethodGet {
+		return false
+	}
+	path := strings.TrimSpace(r.URL.Path)
+	if !strings.HasPrefix(path, "/admin/") {
+		return false
+	}
+	rel := strings.TrimPrefix(path, "/admin/")
+	if rel == "" || strings.Contains(rel, ".") {
+		return false
+	}
+	if strings.TrimSpace(r.Header.Get("Authorization")) != "" {
+		return false
+	}
+	accept := strings.ToLower(r.Header.Get("Accept"))
+	if !strings.Contains(accept, "text/html") {
+		return false
+	}
+	mode := strings.TrimSpace(r.Header.Get("Sec-Fetch-Mode"))
+	return mode == "" || strings.EqualFold(mode, "navigate")
 }
 
 func timeout(d time.Duration) func(http.Handler) http.Handler {
@@ -194,6 +233,16 @@ var defaultCORSAllowHeaders = []string{
 	"X-DeepSeek-Web-To-API-Source",
 	"X-Ds2-Target-Account",
 	"X-Ds2-Source",
+	"X-DeepSeek-Web-To-API-Conversation-ID",
+	"X-Ds2-Conversation-ID",
+	"X-Conversation-ID",
+	"Conversation-ID",
+	"X-Codex-Conversation-ID",
+	"X-Codex-Session-ID",
+	"X-OpenCode-Conversation-ID",
+	"X-OpenCode-Session-ID",
+	"OpenAI-Conversation-ID",
+	"Anthropic-Conversation-ID",
 	"X-Goog-Api-Key",
 	"Anthropic-Version",
 	"Anthropic-Beta",
@@ -256,6 +305,9 @@ func buildCORSAllowHeaders(r *http.Request) string {
 		return strings.Join(names, ", ")
 	}
 	for _, name := range splitCORSRequestHeaders(r.Header.Get("Access-Control-Request-Headers")) {
+		appendCORSHeaderName(&names, seen, name)
+	}
+	for _, name := range requestmeta.ConversationIDHeaders {
 		appendCORSHeaderName(&names, seen, name)
 	}
 	return strings.Join(names, ", ")

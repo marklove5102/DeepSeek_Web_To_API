@@ -40,9 +40,9 @@ func repairOpenAIToolMessage(msg map[string]any, state *toolMessageRepairState) 
 
 	if role == "" {
 		switch itemType {
-		case "function_call_output", "tool_result":
+		case "function_call_output", "tool_result", "tooloutput", "tool_output":
 			return []any{state.repairToolResultMessage(msg)}
-		case "function_call", "tool_call", "tool_use":
+		case "function_call", "tool_call", "tool_use", "toolcall", "tool_use_call":
 			if assistant := state.assistantMessageFromToolCallItem(msg); assistant != nil {
 				return []any{assistant}
 			}
@@ -92,7 +92,7 @@ func (s *toolMessageRepairState) repairAssistantContentBlocks(msg map[string]any
 		}
 		blockType := strings.ToLower(strings.TrimSpace(asString(block["type"])))
 		switch blockType {
-		case "tool_use", "function_call", "tool_call":
+		case "tool_use", "function_call", "tool_call", "toolcall", "tool_use_call":
 			if call := s.repairToolCall(block); call != nil {
 				toolCalls = append(toolCalls, call)
 			}
@@ -212,20 +212,23 @@ func (s *toolMessageRepairState) repairToolCall(call map[string]any) map[string]
 		call["name"],
 		call["tool_name"],
 		call["function_name"],
+		call["recipient_name"],
+		call["toolName"],
+		call["functionName"],
 	)
 	if name == "" && fn != nil {
-		name = firstNonEmptyString(fn["name"], fn["tool_name"], fn["function_name"])
+		name = firstNonEmptyString(fn["name"], fn["tool_name"], fn["function_name"], fn["toolName"], fn["functionName"])
 	}
 	if name == "" {
 		return nil
 	}
 
-	argsRaw := firstExisting(call, "arguments", "input", "args")
+	argsRaw := firstExisting(call, "arguments", "input", "args", "parameters", "params", "arguments_json", "input_json")
 	if argsRaw == nil && fn != nil {
-		argsRaw = firstExisting(fn, "arguments", "input", "args")
+		argsRaw = firstExisting(fn, "arguments", "input", "args", "parameters", "params", "arguments_json", "input_json")
 	}
 
-	id := firstNonEmptyString(call["id"], call["call_id"], call["tool_call_id"], call["tool_use_id"])
+	id := firstNonEmptyString(call["id"], call["call_id"], call["tool_call_id"], call["tool_use_id"], call["callId"], call["toolCallId"], call["toolUseId"])
 	if id == "" {
 		id = s.nextToolCallID()
 	}
@@ -241,16 +244,16 @@ func (s *toolMessageRepairState) repairToolCall(call map[string]any) map[string]
 }
 
 func (s *toolMessageRepairState) repairToolResultMessage(msg map[string]any) map[string]any {
-	content := firstExisting(msg, "content", "output", "result", "text")
+	content := firstExisting(msg, "content", "output", "result", "text", "observation", "data")
 	if block, ok := content.(map[string]any); ok && isToolResultBlock(block) {
-		content = firstExisting(block, "content", "output", "result", "text")
+		content = firstExisting(block, "content", "output", "result", "text", "observation", "data")
 	}
 	if content == nil {
 		content = ""
 	}
 
-	name := firstNonEmptyString(msg["name"], msg["tool_name"], msg["function_name"])
-	callID := firstNonEmptyString(msg["tool_call_id"], msg["call_id"], msg["tool_use_id"], msg["id"])
+	name := firstNonEmptyString(msg["name"], msg["tool_name"], msg["function_name"], msg["recipient_name"], msg["toolName"], msg["functionName"])
+	callID := firstNonEmptyString(msg["tool_call_id"], msg["call_id"], msg["tool_use_id"], msg["id"], msg["callId"], msg["toolCallId"], msg["toolUseId"])
 	callID, name = s.consumePendingToolCall(callID, name)
 
 	out := map[string]any{
@@ -273,7 +276,7 @@ func (s *toolMessageRepairState) recordPendingToolCalls(calls []any) []any {
 		if !ok {
 			continue
 		}
-		id := firstNonEmptyString(call["id"], call["call_id"], call["tool_call_id"])
+		id := firstNonEmptyString(call["id"], call["call_id"], call["tool_call_id"], call["callId"], call["toolCallId"])
 		if id == "" {
 			continue
 		}
@@ -341,7 +344,7 @@ func hasToolResultShape(msg map[string]any) bool {
 	if msg == nil {
 		return false
 	}
-	if firstNonEmptyString(msg["tool_call_id"], msg["call_id"], msg["tool_use_id"]) != "" {
+	if firstNonEmptyString(msg["tool_call_id"], msg["call_id"], msg["tool_use_id"], msg["callId"], msg["toolCallId"], msg["toolUseId"]) != "" {
 		return true
 	}
 	if isToolResultBlock(msg) {
@@ -358,7 +361,7 @@ func isToolResultBlock(block map[string]any) bool {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(asString(block["type"]))) {
-	case "tool_result", "function_call_output":
+	case "tool_result", "function_call_output", "tooloutput", "tool_output":
 		return true
 	default:
 		return false

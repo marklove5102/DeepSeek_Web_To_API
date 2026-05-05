@@ -18,6 +18,7 @@ type Config struct {
 	Server            ServerConfig            `json:"server,omitempty"`
 	Storage           StorageConfig           `json:"storage,omitempty"`
 	Cache             CacheConfig             `json:"cache,omitempty"`
+	Safety            SafetyConfig            `json:"safety,omitempty"`
 	Runtime           RuntimeConfig           `json:"runtime,omitempty"`
 	Compat            CompatConfig            `json:"compat,omitempty"`
 	Responses         ResponsesConfig         `json:"responses,omitempty"`
@@ -187,6 +188,22 @@ type ResponseCacheConfig struct {
 	MaxBodyBytes     int64  `json:"max_body_bytes,omitempty"`
 	MemoryMaxBytes   int64  `json:"memory_max_bytes,omitempty"`
 	DiskMaxBytes     int64  `json:"disk_max_bytes,omitempty"`
+	SemanticKey      *bool  `json:"semantic_key,omitempty"`
+}
+
+type SafetyConfig struct {
+	Enabled                *bool           `json:"enabled,omitempty"`
+	BlockMessage           string          `json:"block_message,omitempty"`
+	BlockedIPs             []string        `json:"blocked_ips,omitempty"`
+	BlockedConversationIDs []string        `json:"blocked_conversation_ids,omitempty"`
+	BannedContent          []string        `json:"banned_content,omitempty"`
+	BannedRegex            []string        `json:"banned_regex,omitempty"`
+	Jailbreak              JailbreakConfig `json:"jailbreak,omitempty"`
+}
+
+type JailbreakConfig struct {
+	Enabled  *bool    `json:"enabled,omitempty"`
+	Patterns []string `json:"patterns,omitempty"`
 }
 
 type RuntimeConfig struct {

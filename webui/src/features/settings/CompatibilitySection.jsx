@@ -9,6 +9,30 @@ export default function CompatibilitySection({ t, form, setForm }) {
             </div>
             <p className="text-sm text-muted-foreground">{t('settings.compatibilityDesc')}</p>
             <div className="flex items-center justify-between gap-4">
+                <div>
+                    <label className="text-sm font-medium block">{t('settings.wideInputStrictOutput')}</label>
+                    <p className="text-xs text-muted-foreground">{t('settings.wideInputStrictOutputDesc')}</p>
+                </div>
+                <button
+                    type="button"
+                    role="switch"
+                    aria-checked={form.compat?.wide_input_strict_output ?? true}
+                    onClick={() => setForm((prev) => ({
+                        ...prev,
+                        compat: { ...prev.compat, wide_input_strict_output: !Boolean(prev.compat?.wide_input_strict_output ?? true) },
+                    }))}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                        form.compat?.wide_input_strict_output ?? true ? 'bg-primary' : 'bg-muted'
+                    }`}
+                >
+                    <span
+                        className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                            form.compat?.wide_input_strict_output ?? true ? 'translate-x-6' : 'translate-x-1'
+                        }`}
+                    />
+                </button>
+            </div>
+            <div className="flex items-center justify-between gap-4">
                 <label className="text-sm font-medium">{t('settings.stripReferenceMarkers')}</label>
                 <button
                     type="button"

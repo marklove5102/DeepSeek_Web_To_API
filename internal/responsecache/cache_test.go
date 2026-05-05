@@ -368,6 +368,31 @@ func TestRequestKeyPreservesSemanticJSONNull(t *testing.T) {
 	}
 }
 
+func TestRequestKeySemanticModeIgnoresTransientToolIDsAndWhitespace(t *testing.T) {
+	t.Parallel()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Content-Type", "application/json")
+	bodyA := []byte(`{
+		"model":"m",
+		"messages":[
+			{"role":"assistant","tool_calls":[{"id":"call_a","type":"function","function":{"name":"read_file","arguments":{"path":"README.md"}}}]},
+			{"role":"tool","tool_call_id":"call_a","content":"line one\nline two"}
+		]
+	}`)
+	bodyB := []byte(`{
+		"model":"m",
+		"messages":[
+			{"role":"assistant","tool_calls":[{"id":"call_b","type":"function","function":{"name":"read_file","arguments":{"path":"README.md"}}}]},
+			{"role":"tool","tool_call_id":"call_b","content":" line one   line two "}
+		]
+	}`)
+
+	if RequestKey(req, "caller-a", bodyA) != RequestKey(req, "caller-a", bodyB) {
+		t.Fatal("expected semantic cache key to ignore transient tool ids and whitespace")
+	}
+}
+
 func TestRequestKeyIgnoresClaudeTransportCacheFields(t *testing.T) {
 	t.Parallel()
 
@@ -481,8 +506,58 @@ func TestStatsReportsCompressionAndTTLs(t *testing.T) {
 	if got := stats["disk_max_bytes"]; got != int64(5678) {
 		t.Fatalf("disk_max_bytes=%v", got)
 	}
+	if got := stats["max_body_bytes"]; got != int64(defaultMaxBody) {
+		t.Fatalf("max_body_bytes=%v", got)
+	}
 	if got := stats["compression"]; got != "gzip" {
 		t.Fatalf("compression=%v", got)
+	}
+}
+
+func TestApplyOptionsHotReloadsCacheSettings(t *testing.T) {
+	t.Parallel()
+
+	cache := New(Options{Dir: t.TempDir(), MemoryTTL: time.Hour, DiskTTL: time.Hour, MemoryMaxBytes: 1024, DiskMaxBytes: 1024, SemanticKey: true})
+	cache.Set(strings.Repeat("f", 64), Entry{Status: http.StatusOK, Body: []byte(`{"cached":true}`)})
+	if stats := cache.Stats(); stats["memory_items"] != 1 {
+		t.Fatalf("expected warm cache before hot reload, got %v", stats["memory_items"])
+	}
+
+	newDir := t.TempDir()
+	cache.ApplyOptions(Options{
+		Dir:            newDir,
+		MemoryTTL:      time.Minute,
+		DiskTTL:        2 * time.Hour,
+		MaxBody:        2048,
+		MemoryMaxBytes: 512,
+		DiskMaxBytes:   4096,
+		SemanticKey:    false,
+	})
+
+	stats := cache.Stats()
+	if got := stats["disk_dir"]; got != newDir {
+		t.Fatalf("disk_dir=%v", got)
+	}
+	if got := stats["memory_ttl_seconds"]; got != 60 {
+		t.Fatalf("memory_ttl_seconds=%v", got)
+	}
+	if got := stats["disk_ttl_seconds"]; got != 7200 {
+		t.Fatalf("disk_ttl_seconds=%v", got)
+	}
+	if got := stats["max_body_bytes"]; got != int64(2048) {
+		t.Fatalf("max_body_bytes=%v", got)
+	}
+	if got := stats["memory_max_bytes"]; got != int64(512) {
+		t.Fatalf("memory_max_bytes=%v", got)
+	}
+	if got := stats["disk_max_bytes"]; got != int64(4096) {
+		t.Fatalf("disk_max_bytes=%v", got)
+	}
+	if got := stats["semantic_key"]; got != false {
+		t.Fatalf("semantic_key=%v", got)
+	}
+	if got := stats["memory_items"]; got != 0 {
+		t.Fatalf("expected memory cache to be reset after hot reload, got %v", got)
 	}
 }
 
