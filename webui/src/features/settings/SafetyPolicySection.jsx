@@ -182,8 +182,12 @@ export default function SafetyPolicySection({ t, form, setForm }) {
                             <input
                                 type="number"
                                 min={1}
+                                max={1000000}
                                 value={autoBan.threshold ?? 3}
-                                onChange={(e) => updateAutoBan(setForm, { threshold: Number(e.target.value) })}
+                                onChange={(e) => {
+                                    const n = Number(e.target.value)
+                                    updateAutoBan(setForm, { threshold: Number.isFinite(n) && n >= 1 ? Math.min(n, 1000000) : 3 })
+                                }}
                                 disabled={!autoBanEnabled}
                                 className="w-full bg-background border border-border rounded-lg px-3 py-2 disabled:opacity-50"
                             />
@@ -193,8 +197,12 @@ export default function SafetyPolicySection({ t, form, setForm }) {
                             <input
                                 type="number"
                                 min={1}
+                                max={2592000}
                                 value={autoBan.window_seconds ?? 600}
-                                onChange={(e) => updateAutoBan(setForm, { window_seconds: Number(e.target.value) })}
+                                onChange={(e) => {
+                                    const n = Number(e.target.value)
+                                    updateAutoBan(setForm, { window_seconds: Number.isFinite(n) && n >= 1 ? Math.min(n, 2592000) : 600 })
+                                }}
                                 disabled={!autoBanEnabled}
                                 className="w-full bg-background border border-border rounded-lg px-3 py-2 disabled:opacity-50"
                             />

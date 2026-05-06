@@ -77,11 +77,25 @@ export function useAdminAuth({ isProduction, location, t }) {
                     })
                     if (res.ok) {
                         setToken(storedToken)
+                    } else if (res.status === 401 || res.status === 403) {
+                        // Token explicitly rejected — server told us it is
+                        // invalid (admin password change bumped JWTValidAfterUnix,
+                        // or token was issued before a clear-tokens action).
+                        handleAuthExpired()
                     } else {
+                        // 5xx / unexpected status — server is up but unhappy;
+                        // do not silently keep the token alive. Treat as a
+                        // soft-fail and require explicit login.
                         handleAuthExpired()
                     }
                 } catch {
-                    setToken(storedToken)
+                    // Network failure (server down / offline / DNS error).
+                    // The previous behaviour of trusting the cached token here
+                    // was a security issue: an attacker who controls the
+                    // network could induce a permanent skip of server-side
+                    // token revocation. Treat as auth failure; the user can
+                    // retry once connectivity is back.
+                    handleAuthExpired()
                 }
             }
             setAuthChecking(false)

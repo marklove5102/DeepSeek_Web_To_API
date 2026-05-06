@@ -78,11 +78,42 @@ function listToText(items) {
     return items.filter((item) => String(item || '').trim()).join('\n')
 }
 
+// textToList parses a multi-line / comma-separated textarea value into a
+// clean list of trimmed entries. Each entry is sanitized to remove
+// control characters (\x00-\x1F minus tab, \x7F) before being sent to
+// the Go backend; without this an admin could paste a payload that
+// includes embedded NULs or newlines that would later parse as separate
+// list items in regex / IP / banned-content lists.
 function textToList(raw) {
     return String(raw || '')
         .split(/\r?\n|,/)
-        .map((item) => item.trim())
+        .map((item) => sanitizeListItem(item))
         .filter(Boolean)
+}
+
+function sanitizeListItem(value) {
+    return String(value || '')
+        // strip control chars (keep \t and \n already handled by split)
+        .replace(/[\u0000-\u001f\u007f]/g, '')
+        .trim()
+}
+
+// safeNumber maps any user-entered value to a finite number with explicit
+// fallback. Number(e.target.value) on an empty input yields 0, on a non
+// numeric string yields NaN — neither should reach the Go backend without
+// a deliberate decision. min/max default to no-clamping.
+function safeNumber(raw, fallback, min, max) {
+    const n = Number(raw)
+    if (!Number.isFinite(n)) {
+        return fallback
+    }
+    if (typeof min === 'number' && n < min) {
+        return min
+    }
+    if (typeof max === 'number' && n > max) {
+        return max
+    }
+    return n
 }
 
 function fromServerForm(data) {
@@ -143,8 +174,8 @@ function fromServerForm(data) {
             },
             auto_ban: {
                 enabled: data.safety?.auto_ban?.enabled ?? true,
-                threshold: Number(data.safety?.auto_ban?.threshold ?? 3),
-                window_seconds: Number(data.safety?.auto_ban?.window_seconds ?? 600),
+                threshold: safeNumber(data.safety?.auto_ban?.threshold, 3, 1, 1_000_000),
+                window_seconds: safeNumber(data.safety?.auto_ban?.window_seconds, 600, 1, 30 * 24 * 60 * 60),
             },
         },
         model_aliases_text: JSON.stringify(data.model_aliases || {}, null, 2),
@@ -200,8 +231,8 @@ function toServerPayload(form) {
             },
             auto_ban: {
                 enabled: Boolean(form.safety?.auto_ban?.enabled ?? true),
-                threshold: Number(form.safety?.auto_ban?.threshold ?? 3),
-                window_seconds: Number(form.safety?.auto_ban?.window_seconds ?? 600),
+                threshold: safeNumber(form.safety?.auto_ban?.threshold, 3, 1, 1_000_000),
+                window_seconds: safeNumber(form.safety?.auto_ban?.window_seconds, 600, 1, 30 * 24 * 60 * 60),
             },
         },
     }
