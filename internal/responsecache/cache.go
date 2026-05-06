@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"DeepSeek_Web_To_API/internal/account"
 	"DeepSeek_Web_To_API/internal/auth"
 	"DeepSeek_Web_To_API/internal/config"
 )
@@ -74,6 +75,8 @@ type Cache struct {
 	pathStats      map[string]*pathStat
 	items          map[string]memoryEntry
 	inflight       map[string]*inflightSlot
+	sessionEntries map[string]map[string]struct{}
+	sessionHits    int64
 	lastDiskSweep  time.Time
 	onHit          HitFunc
 	semanticKey    bool
@@ -115,6 +118,12 @@ type memoryEntry struct {
 	entry           Entry
 	memoryExpiresAt time.Time
 	size            int64
+	// sessionKey ties this entry to a logical conversation as derived from
+	// (owner, body fingerprint). When a session is alive, every memory hit
+	// on ANY of its entries refreshes the lease on ALL of its entries —
+	// session-wide sliding window. Empty for shared-across-callers paths
+	// (embeddings, count_tokens) where session affinity does not apply.
+	sessionKey string
 }
 
 type diskRecord struct {
@@ -140,6 +149,7 @@ func New(opts Options) *Cache {
 		pathStats:      map[string]*pathStat{},
 		items:          map[string]memoryEntry{},
 		inflight:       map[string]*inflightSlot{},
+		sessionEntries: map[string]map[string]struct{}{},
 		onHit:          opts.OnHit,
 		semanticKey:    opts.SemanticKey,
 	}
@@ -207,6 +217,7 @@ func (c *Cache) ApplyOptions(opts Options) {
 	if c.inflight == nil {
 		c.inflight = map[string]*inflightSlot{}
 	}
+	c.sessionEntries = map[string]map[string]struct{}{}
 }
 
 func (c *Cache) Middleware(resolver CallerResolver) func(http.Handler) http.Handler {
@@ -263,6 +274,10 @@ func (c *Cache) Wrap(resolver CallerResolver, next http.Handler) http.Handler {
 		}
 
 		key := c.requestKeyWithPolicy(r, owner, rawBody, policy)
+		sessionKey := ""
+		if !policy.SharedAcrossCallers && owner != "" {
+			sessionKey = account.SessionKey(sha256.Sum256([]byte(owner)), rawBody)
+		}
 		if entry, source, ok := c.getWithPolicy(key, policy); ok {
 			if c.onHit != nil {
 				c.onHit(r, cloneEntry(entry), source)
@@ -297,7 +312,7 @@ func (c *Cache) Wrap(resolver CallerResolver, next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(cw, r)
 		if entry, ok, reason := cw.cacheEntry(); ok {
-			c.setWithPolicy(key, entry, policy)
+			c.setWithPolicySession(key, sessionKey, entry, policy)
 		} else {
 			c.recordUncacheable(policy.Path, reason)
 		}
@@ -572,6 +587,8 @@ func (c *Cache) getWithPolicy(key string, policy pathPolicy) (Entry, string, boo
 			c.mu.Unlock()
 			return entry, "memory", true
 		}
+		c.memoryBytes -= item.size
+		c.removeFromSessionLocked(item.sessionKey, key)
 		delete(c.items, key)
 	}
 	c.mu.Unlock()
@@ -592,7 +609,11 @@ func (c *Cache) getWithPolicy(key string, policy pathPolicy) (Entry, string, boo
 // that re-issue identical tool calls — keep their entry hot beyond the
 // initial memoryTTL. The extension is capped by the entry's disk
 // expiration: once disk has expired, the cache row is logically dead even
-// if memory keeps requesting it. Callers must hold c.mu.
+// if memory keeps requesting it. When the entry belongs to a logical
+// session (sessionKey is set), every sibling entry of that session ALSO
+// gets its lease refreshed — that is the session-wide stickiness contract:
+// activity on any turn keeps every cached turn of the same conversation
+// hot together. Callers must hold c.mu.
 func (c *Cache) bumpMemoryExpiryLocked(key string, now time.Time, policy pathPolicy) {
 	item, ok := c.items[key]
 	if !ok {
@@ -605,6 +626,28 @@ func (c *Cache) bumpMemoryExpiryLocked(key string, now time.Time, policy pathPol
 	if memoryTTL <= 0 {
 		return
 	}
+	c.bumpSingleEntryExpiryLocked(key, item, now, memoryTTL)
+	if item.sessionKey == "" {
+		return
+	}
+	siblings, ok := c.sessionEntries[item.sessionKey]
+	if !ok || len(siblings) <= 1 {
+		return
+	}
+	for siblingKey := range siblings {
+		if siblingKey == key {
+			continue
+		}
+		sibling, ok := c.items[siblingKey]
+		if !ok {
+			continue
+		}
+		c.bumpSingleEntryExpiryLocked(siblingKey, sibling, now, memoryTTL)
+	}
+	c.sessionHits++
+}
+
+func (c *Cache) bumpSingleEntryExpiryLocked(key string, item memoryEntry, now time.Time, memoryTTL time.Duration) {
 	extended := now.Add(memoryTTL)
 	if item.entry.DiskExpiresAt.Before(extended) {
 		extended = item.entry.DiskExpiresAt
@@ -615,15 +658,54 @@ func (c *Cache) bumpMemoryExpiryLocked(key string, now time.Time, policy pathPol
 	}
 }
 
+// addToSessionLocked links a cache key to a logical session bucket. Empty
+// sessionKey is a no-op (the entry is unsessioned). Callers must hold c.mu.
+func (c *Cache) addToSessionLocked(sessionKey, cacheKey string) {
+	if sessionKey == "" || cacheKey == "" {
+		return
+	}
+	if c.sessionEntries == nil {
+		c.sessionEntries = map[string]map[string]struct{}{}
+	}
+	bucket, ok := c.sessionEntries[sessionKey]
+	if !ok {
+		bucket = map[string]struct{}{}
+		c.sessionEntries[sessionKey] = bucket
+	}
+	bucket[cacheKey] = struct{}{}
+}
+
+// removeFromSessionLocked unlinks a cache key from its session bucket and
+// drops the bucket if empty. Empty sessionKey is a no-op. Callers must hold
+// c.mu.
+func (c *Cache) removeFromSessionLocked(sessionKey, cacheKey string) {
+	if sessionKey == "" || cacheKey == "" {
+		return
+	}
+	bucket, ok := c.sessionEntries[sessionKey]
+	if !ok {
+		return
+	}
+	delete(bucket, cacheKey)
+	if len(bucket) == 0 {
+		delete(c.sessionEntries, sessionKey)
+	}
+}
+
 // Set is a backward-compatible wrapper that uses no path policy (the global
 // memory/disk TTLs apply). External callers that don't carry path context
 // can keep using this; the in-package middleware always routes through
-// setWithPolicy so per-path TTL overrides take effect.
+// setWithPolicySession so per-path TTL overrides and session linkage take
+// effect.
 func (c *Cache) Set(key string, entry Entry) {
-	c.setWithPolicy(key, entry, pathPolicy{})
+	c.setWithPolicySession(key, "", entry, pathPolicy{})
 }
 
 func (c *Cache) setWithPolicy(key string, entry Entry, policy pathPolicy) {
+	c.setWithPolicySession(key, "", entry, policy)
+}
+
+func (c *Cache) setWithPolicySession(key, sessionKey string, entry Entry, policy pathPolicy) {
 	key = normalizeKey(key)
 	if key == "" || !entry.cacheable(c.maxBody) {
 		return
@@ -637,7 +719,7 @@ func (c *Cache) setWithPolicy(key string, entry Entry, policy pathPolicy) {
 		entry.DiskExpiresAt = now.Add(diskTTL)
 	}
 	entry = cloneEntry(entry)
-	c.putMemoryWithPolicy(key, entry, now, policy)
+	c.putMemoryWithPolicySession(key, sessionKey, entry, now, policy)
 	if err := c.putDisk(key, entry, now); err != nil {
 		config.Logger.Warn("[response_cache] disk write failed", "error", err)
 	} else {
@@ -713,10 +795,14 @@ func canonicalRequestPath(path string) string {
 }
 
 func (c *Cache) putMemory(key string, entry Entry, now time.Time) {
-	c.putMemoryWithPolicy(key, entry, now, pathPolicy{})
+	c.putMemoryWithPolicySession(key, "", entry, now, pathPolicy{})
 }
 
 func (c *Cache) putMemoryWithPolicy(key string, entry Entry, now time.Time, policy pathPolicy) {
+	c.putMemoryWithPolicySession(key, "", entry, now, policy)
+}
+
+func (c *Cache) putMemoryWithPolicySession(key, sessionKey string, entry Entry, now time.Time, policy pathPolicy) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sweepMemoryLocked(now)
@@ -735,9 +821,36 @@ func (c *Cache) putMemoryWithPolicy(key string, entry Entry, now time.Time, poli
 	if expiresAt.After(now) {
 		if old, ok := c.items[key]; ok {
 			c.memoryBytes -= old.size
+			if old.sessionKey != "" && old.sessionKey != sessionKey {
+				c.removeFromSessionLocked(old.sessionKey, key)
+			}
 		}
-		c.items[key] = memoryEntry{entry: cloneEntry(entry), memoryExpiresAt: expiresAt, size: size}
+		c.items[key] = memoryEntry{
+			entry:           cloneEntry(entry),
+			memoryExpiresAt: expiresAt,
+			size:            size,
+			sessionKey:      sessionKey,
+		}
 		c.memoryBytes += size
+		c.addToSessionLocked(sessionKey, key)
+		// Storing a new entry IS session activity. Refresh sibling leases
+		// so a long-running conversation's earlier turns do not get swept
+		// out from under it just because a new turn took longer than
+		// memoryTTL to arrive.
+		if sessionKey != "" {
+			if siblings, ok := c.sessionEntries[sessionKey]; ok {
+				for siblingKey := range siblings {
+					if siblingKey == key {
+						continue
+					}
+					sibling, ok := c.items[siblingKey]
+					if !ok {
+						continue
+					}
+					c.bumpSingleEntryExpiryLocked(siblingKey, sibling, now, memoryTTL)
+				}
+			}
+		}
 		c.enforceMemoryLimitLocked()
 	}
 }
@@ -747,6 +860,7 @@ func (c *Cache) sweepMemoryLocked(now time.Time) {
 		if !now.Before(item.memoryExpiresAt) || !now.Before(item.entry.DiskExpiresAt) {
 			delete(c.items, key)
 			c.memoryBytes -= item.size
+			c.removeFromSessionLocked(item.sessionKey, key)
 		}
 	}
 	if c.memoryBytes < 0 {
@@ -771,6 +885,7 @@ func (c *Cache) enforceMemoryLimitLocked() {
 		}
 		delete(c.items, oldestKey)
 		c.memoryBytes -= oldest.size
+		c.removeFromSessionLocked(oldest.sessionKey, oldestKey)
 	}
 	if c.memoryBytes < 0 {
 		c.memoryBytes = 0
@@ -1450,6 +1565,8 @@ func (c *Cache) Stats() map[string]any {
 		"disk_hits":          c.diskHits,
 		"inflight_hits":      c.inflightHits,
 		"inflight_pending":   len(c.inflight),
+		"session_hits":       c.sessionHits,
+		"active_sessions":    len(c.sessionEntries),
 		"memory_items":       len(c.items),
 		"memory_bytes":       c.memoryBytes,
 		"memory_max_bytes":   c.memoryMaxBytes,

@@ -27,6 +27,92 @@ func (s stubResolver) DetermineCaller(_ *http.Request) (*auth.RequestAuth, error
 	return &auth.RequestAuth{CallerID: s.caller}, nil
 }
 
+// TestSessionWideStickyTTLRefreshesSiblingsOnHit pins the session-level
+// stickiness contract: when ANY entry in a logical conversation is hit,
+// every sibling entry of that session also gets its lease refreshed. This
+// is what keeps a multi-turn coding-agent conversation's full prefix hot
+// as long as the conversation is alive — turn 5's hit reaches back and
+// extends the lease on turns 1..4 too. Without this, an early-turn entry
+// stored 25 minutes ago would expire even while the conversation is
+// actively progressing.
+func TestSessionWideStickyTTLRefreshesSiblingsOnHit(t *testing.T) {
+	t.Parallel()
+
+	// 200ms memoryTTL so the test runs fast; 1h diskTTL so the cap is far.
+	cache := New(Options{Dir: t.TempDir(), MemoryTTL: 200 * time.Millisecond, DiskTTL: time.Hour})
+	resolver := stubResolver{caller: "caller-a"}
+
+	// Turn 1: distinct body, but same first user message ("hi") — keeps
+	// the SessionKey stable across turns. Turn 2 appends an assistant +
+	// user message and arrives 130ms later.
+	turn1 := `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}`
+	turn2 := `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"},{"role":"user","content":"continue"}]}`
+
+	var upstream int32
+	handler := cache.Wrap(resolver, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&upstream, 1)
+		w.Header().Set("Content-Type", "application/json")
+		// Echo something distinguishable per body so we can confirm the
+		// right entry is served.
+		body, _ := io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{"echo_len":` + fmt.Sprintf("%d", len(body)) + `}`))
+	}))
+
+	mkReq := func(body string) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer key-a")
+		return req
+	}
+
+	// Prime turn 1.
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, mkReq(turn1))
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("turn1 prime status=%d", rec1.Code)
+	}
+
+	// 130ms later, prime turn 2 (different body, but same session).
+	time.Sleep(130 * time.Millisecond)
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, mkReq(turn2))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("turn2 prime status=%d", rec2.Code)
+	}
+
+	// 130ms later (260ms after turn1 prime; turn1's plain TTL would have
+	// expired at 200ms). Hitting turn2 should refresh turn1's lease via
+	// session linkage.
+	time.Sleep(130 * time.Millisecond)
+	rec3 := httptest.NewRecorder()
+	handler.ServeHTTP(rec3, mkReq(turn2))
+	if got := rec3.Header().Get("X-DeepSeek-Web-To-API-Cache"); got != "memory" {
+		t.Fatalf("turn2 second hit must serve from memory, got %q", got)
+	}
+
+	// Now retry turn 1 (390ms after its original prime — well beyond plain
+	// TTL of 200ms). It must still hit because the previous session-wide
+	// bump extended its lease.
+	rec4 := httptest.NewRecorder()
+	handler.ServeHTTP(rec4, mkReq(turn1))
+	if got := rec4.Header().Get("X-DeepSeek-Web-To-API-Cache"); got != "memory" {
+		t.Fatalf("turn1 retry after session bump must serve from memory, got %q", got)
+	}
+
+	// Two upstream calls (one per prime), zero on hits.
+	if got := atomic.LoadInt32(&upstream); got != 2 {
+		t.Fatalf("expected exactly 2 upstream calls (one per turn prime), got %d", got)
+	}
+
+	stats := cache.Stats()
+	if got, _ := stats["session_hits"].(int64); got < 1 {
+		t.Fatalf("session_hits = %v, want >= 1 (rec3/rec4 should each fire)", stats["session_hits"])
+	}
+	if got, _ := stats["active_sessions"].(int); got != 1 {
+		t.Fatalf("active_sessions = %v, want 1", stats["active_sessions"])
+	}
+}
+
 // TestSlidingWindowKeepsActiveEntryHot pins the session-stickiness contract:
 // every memory hit must extend the entry's lease by memoryTTL (capped by
 // disk expiration). Active conversations that keep hitting the same key

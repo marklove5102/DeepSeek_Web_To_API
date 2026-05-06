@@ -69,6 +69,8 @@ type overviewCacheStats struct {
 	UncacheableSetCookie    int64                            `json:"uncacheable_set_cookie"`
 	InflightHits            int64                            `json:"inflight_hits"`
 	InflightPending         int64                            `json:"inflight_pending"`
+	SessionHits             int64                            `json:"session_hits"`
+	ActiveSessions          int64                            `json:"active_sessions"`
 	MemoryItems             int64                            `json:"memory_items"`
 	MemoryBytes             int64                            `json:"memory_bytes"`
 	MemoryMaxBytes          int64                            `json:"memory_max_bytes"`
@@ -270,6 +272,8 @@ func (h *Handler) cacheStats() overviewCacheStats {
 		UncacheableSetCookie:    int64Stat(raw, "uncacheable_set_cookie"),
 		InflightHits:            int64Stat(raw, "inflight_hits"),
 		InflightPending:         int64Stat(raw, "inflight_pending"),
+		SessionHits:             int64Stat(raw, "session_hits"),
+		ActiveSessions:          int64Stat(raw, "active_sessions"),
 		MemoryItems:             int64Stat(raw, "memory_items"),
 		MemoryBytes:             int64Stat(raw, "memory_bytes"),
 		MemoryMaxBytes:          int64Stat(raw, "memory_max_bytes"),
