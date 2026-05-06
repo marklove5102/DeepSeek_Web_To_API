@@ -61,6 +61,18 @@ func AccountsSQLitePath() string {
 	return ResolvePath("DEEPSEEK_WEB_TO_API_ACCOUNTS_SQLITE_PATH", "data/accounts.sqlite")
 }
 
+func TokenUsageSQLitePath() string {
+	return ResolvePath("DEEPSEEK_WEB_TO_API_TOKEN_USAGE_SQLITE_PATH", "data/token_usage.sqlite")
+}
+
+func SafetyWordsSQLitePath() string {
+	return ResolvePath("DEEPSEEK_WEB_TO_API_SAFETY_WORDS_SQLITE_PATH", "data/safety_words.sqlite")
+}
+
+func SafetyIPsSQLitePath() string {
+	return ResolvePath("DEEPSEEK_WEB_TO_API_SAFETY_IPS_SQLITE_PATH", "data/safety_ips.sqlite")
+}
+
 func ResponseCacheDir() string {
 	return ResolvePath("DEEPSEEK_WEB_TO_API_RESPONSE_CACHE_DIR", "data/response_cache")
 }

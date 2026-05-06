@@ -14,6 +14,7 @@ import (
 
 	"DeepSeek_Web_To_API/internal/account"
 	"DeepSeek_Web_To_API/internal/config"
+	"DeepSeek_Web_To_API/internal/requestmeta"
 )
 
 type ctxKey string
@@ -156,6 +157,9 @@ func sessionKeyFromRequest(req *http.Request, callerHash [32]byte, body []byte) 
 	if req != nil {
 		if scope := requestHeader(req, SessionAffinityHeader, LegacySessionAffinityHeader); scope != "" {
 			return account.ScopedSessionKey(callerHash, scope)
+		}
+		if conversationID := requestmeta.ConversationID(req, body); conversationID != "" {
+			return account.ScopedSessionKey(callerHash, "conversation:"+conversationID)
 		}
 	}
 	bodyKey := account.SessionKey(callerHash, body)

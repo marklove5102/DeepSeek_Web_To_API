@@ -37,8 +37,13 @@ export default function Login({ onLogin, onMessage }) {
             const data = await readLoginResponse(res)
 
             if (res.ok && data.success) {
-                sessionStorage.setItem('deepseek-web-to-api_token', data.token)
-                sessionStorage.setItem('deepseek-web-to-api_token_expires', Date.now() + data.expires_in * 1000)
+                // Use localStorage so that the JWT survives full page refreshes
+                // (sessionStorage was cleared by Firefox/some browsers on hard
+                // refresh, leaving the SPA to dispatch unauthenticated requests
+                // and triggering {"detail":"authentication required"}). See
+                // cnb.cool/Neko_Kernel/DeepSeek_Web_To_API#9.
+                localStorage.setItem('deepseek-web-to-api_token', data.token)
+                localStorage.setItem('deepseek-web-to-api_token_expires', Date.now() + data.expires_in * 1000)
 
                 onLogin(data.token)
                 if (data.message) {

@@ -153,12 +153,22 @@ func (s *inlineUploadState) tryUploadBlock(block map[string]any) (map[string]any
 		err := fmt.Errorf("exceeded maximum of %d inline files per request", maxInlineFilesPerRequest)
 		return nil, true, &inlineFileUploadError{status: http.StatusBadRequest, message: err.Error(), err: err}
 	}
+	s.uploadCount++
+	s.inlineFileBytes += len(decoded.Data)
+
+	// When a Store is wired, honour its RemoteFileUploadEnabled switch:
+	// the production default disables forwarding to the rate-limited
+	// upstream upload_file endpoint and inlines the bytes instead. Tests
+	// that omit Store (nil) preserve the legacy upload path so the upload
+	// pipeline itself remains exercised.
+	if s.handler != nil && s.handler.Store != nil && !s.handler.Store.RemoteFileUploadEnabled() {
+		return inlineFileTextReplacement(decoded), true, nil
+	}
+
 	fileID, err := s.uploadInlineFile(decoded)
 	if err != nil {
 		return nil, true, &inlineFileUploadError{status: http.StatusInternalServerError, message: "Failed to upload inline file.", err: err}
 	}
-	s.uploadCount++
-	s.inlineFileBytes += len(decoded.Data)
 	replacement := map[string]any{
 		"type":    decoded.ReplacementType,
 		"file_id": fileID,
@@ -170,6 +180,82 @@ func (s *inlineUploadState) tryUploadBlock(block map[string]any) (map[string]any
 		replacement["mime_type"] = decoded.ContentType
 	}
 	return replacement, true, nil
+}
+
+// inlineFileTextReplacement converts a decoded inline file into a plain text
+// content block. Binary types (images, audio, PDFs, etc.) are surfaced as a
+// brief placeholder rather than the raw bytes so we do not inflate the prompt
+// with unreadable noise.
+func inlineFileTextReplacement(file inlineDecodedFile) map[string]any {
+	contentType := strings.ToLower(strings.TrimSpace(file.ContentType))
+	filename := strings.TrimSpace(file.Filename)
+	header := "--- inline file"
+	if filename != "" {
+		header = fmt.Sprintf("--- inline file: %s", filename)
+	}
+	if contentType != "" {
+		header += fmt.Sprintf(" (%s, %d bytes)", contentType, len(file.Data))
+	} else {
+		header += fmt.Sprintf(" (%d bytes)", len(file.Data))
+	}
+	header += " ---"
+	body := ""
+	if isInlinableTextType(contentType, file.Data) {
+		body = string(file.Data)
+	} else {
+		name := filename
+		if name == "" {
+			name = "<unnamed>"
+		}
+		body = fmt.Sprintf("[binary attachment %q omitted; %d bytes %s. Upstream file upload is disabled to avoid rate limiting.]",
+			name, len(file.Data), nonEmptyOr(contentType, "(unknown content type)"))
+	}
+	return map[string]any{
+		"type": "text",
+		"text": header + "\n" + body,
+	}
+}
+
+func isInlinableTextType(contentType string, data []byte) bool {
+	if contentType != "" {
+		switch {
+		case strings.HasPrefix(contentType, "text/"):
+			return true
+		case strings.HasSuffix(contentType, "+json"), strings.HasSuffix(contentType, "+xml"):
+			return true
+		}
+		switch contentType {
+		case "application/json", "application/xml", "application/yaml", "application/x-yaml",
+			"application/javascript", "application/typescript", "application/sql",
+			"application/x-sh", "application/toml":
+			return true
+		}
+		// Anything else with an explicit content type falls through to byte
+		// sniffing below; if the bytes still look like text we inline them.
+	}
+	if len(data) == 0 {
+		return false
+	}
+	sniffLen := len(data)
+	if sniffLen > 4096 {
+		sniffLen = 4096
+	}
+	for _, b := range data[:sniffLen] {
+		if b == 0 {
+			return false
+		}
+		if b < 0x09 || (b > 0x0d && b < 0x20 && b != 0x1b) {
+			return false
+		}
+	}
+	return true
+}
+
+func nonEmptyOr(v, fallback string) string {
+	if strings.TrimSpace(v) != "" {
+		return v
+	}
+	return fallback
 }
 
 func (s *inlineUploadState) uploadInlineFile(file inlineDecodedFile) (string, error) {

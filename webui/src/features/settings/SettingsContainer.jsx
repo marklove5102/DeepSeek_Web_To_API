@@ -3,8 +3,10 @@ import { AlertTriangle, Save } from 'lucide-react'
 import { useI18n } from '../../i18n'
 import { useSettingsForm } from './useSettingsForm'
 import SecuritySection from './SecuritySection'
+import SafetyPolicySection from './SafetyPolicySection'
 import RuntimeSection from './RuntimeSection'
 import BehaviorSection from './BehaviorSection'
+import CacheSection from './CacheSection'
 import CurrentInputFileSection from './HistorySplitSection'
 import CompatibilitySection from './CompatibilitySection'
 import AutoDeleteSection from './AutoDeleteSection'
@@ -63,9 +65,13 @@ export default function SettingsContainer({ onRefresh, onMessage, authFetch, onF
                 onUpdatePassword={updatePassword}
             />
 
+            <SafetyPolicySection t={t} form={form} setForm={setForm} />
+
             <RuntimeSection t={t} form={form} setForm={setForm} />
 
             <BehaviorSection t={t} form={form} setForm={setForm} />
+
+            <CacheSection t={t} form={form} setForm={setForm} />
 
             <CurrentInputFileSection t={t} form={form} setForm={setForm} />
 

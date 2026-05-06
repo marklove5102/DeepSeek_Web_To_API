@@ -130,6 +130,57 @@ func (s *Store) ChatHistorySQLitePath() string {
 	return resolvePathValue("data/chat_history.sqlite", "data/chat_history.sqlite")
 }
 
+func (s *Store) TokenUsageSQLitePath() string {
+	if raw := strings.TrimSpace(os.Getenv("DEEPSEEK_WEB_TO_API_TOKEN_USAGE_SQLITE_PATH")); raw != "" {
+		return resolvePathValue(raw, "data/token_usage.sqlite")
+	}
+	s.mu.RLock()
+	dataDir := s.cfg.Storage.DataDir
+	configured := s.cfg.Storage.TokenUsageSQLitePath
+	s.mu.RUnlock()
+	if strings.TrimSpace(configured) != "" {
+		return resolvePathValue(configured, "data/token_usage.sqlite")
+	}
+	if strings.TrimSpace(dataDir) != "" {
+		return filepath.Join(resolvePathValue(dataDir, "data"), "token_usage.sqlite")
+	}
+	return TokenUsageSQLitePath()
+}
+
+func (s *Store) SafetyWordsSQLitePath() string {
+	if raw := strings.TrimSpace(os.Getenv("DEEPSEEK_WEB_TO_API_SAFETY_WORDS_SQLITE_PATH")); raw != "" {
+		return resolvePathValue(raw, "data/safety_words.sqlite")
+	}
+	s.mu.RLock()
+	dataDir := s.cfg.Storage.DataDir
+	configured := s.cfg.Storage.SafetyWordsSQLitePath
+	s.mu.RUnlock()
+	if strings.TrimSpace(configured) != "" {
+		return resolvePathValue(configured, "data/safety_words.sqlite")
+	}
+	if strings.TrimSpace(dataDir) != "" {
+		return filepath.Join(resolvePathValue(dataDir, "data"), "safety_words.sqlite")
+	}
+	return SafetyWordsSQLitePath()
+}
+
+func (s *Store) SafetyIPsSQLitePath() string {
+	if raw := strings.TrimSpace(os.Getenv("DEEPSEEK_WEB_TO_API_SAFETY_IPS_SQLITE_PATH")); raw != "" {
+		return resolvePathValue(raw, "data/safety_ips.sqlite")
+	}
+	s.mu.RLock()
+	dataDir := s.cfg.Storage.DataDir
+	configured := s.cfg.Storage.SafetyIPsSQLitePath
+	s.mu.RUnlock()
+	if strings.TrimSpace(configured) != "" {
+		return resolvePathValue(configured, "data/safety_ips.sqlite")
+	}
+	if strings.TrimSpace(dataDir) != "" {
+		return filepath.Join(resolvePathValue(dataDir, "data"), "safety_ips.sqlite")
+	}
+	return SafetyIPsSQLitePath()
+}
+
 func (s *Store) RawStreamSampleRoot() string {
 	if raw := strings.TrimSpace(os.Getenv("DEEPSEEK_WEB_TO_API_RAW_STREAM_SAMPLE_ROOT")); raw != "" {
 		return resolvePathValue(raw, "tests/raw_stream_samples")
@@ -196,6 +247,42 @@ func (s *Store) ResponseCacheDiskMaxBytes() int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.cfg.Cache.Response.DiskMaxBytes
+}
+
+func (s *Store) ResponseCacheSemanticKey() bool {
+	if raw := strings.TrimSpace(os.Getenv("DEEPSEEK_WEB_TO_API_RESPONSE_CACHE_SEMANTIC_KEY")); raw != "" {
+		return parseBoolDefault(raw, true)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.cfg.Cache.Response.SemanticKey != nil {
+		return *s.cfg.Cache.Response.SemanticKey
+	}
+	return true
+}
+
+func (s *Store) SafetyConfig() SafetyConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cfg := s.cfg.Safety
+	return SafetyConfig{
+		Enabled:                cloneBoolPtr(cfg.Enabled),
+		BlockMessage:           cfg.BlockMessage,
+		BlockedIPs:             append([]string(nil), cfg.BlockedIPs...),
+		AllowedIPs:             append([]string(nil), cfg.AllowedIPs...),
+		BlockedConversationIDs: append([]string(nil), cfg.BlockedConversationIDs...),
+		BannedContent:          append([]string(nil), cfg.BannedContent...),
+		BannedRegex:            append([]string(nil), cfg.BannedRegex...),
+		Jailbreak: JailbreakConfig{
+			Enabled:  cloneBoolPtr(cfg.Jailbreak.Enabled),
+			Patterns: append([]string(nil), cfg.Jailbreak.Patterns...),
+		},
+		AutoBan: SafetyAutoBanConfig{
+			Enabled:       cloneBoolPtr(cfg.AutoBan.Enabled),
+			Threshold:     cfg.AutoBan.Threshold,
+			WindowSeconds: cfg.AutoBan.WindowSeconds,
+		},
+	}
 }
 
 func resolvePathValue(raw, defaultRel string) string {

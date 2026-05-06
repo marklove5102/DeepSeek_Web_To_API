@@ -139,13 +139,58 @@ STORE --> SAVE
 
 ### 缓存默认值
 
-| 配置 | 默认/示例 |
-| --- | --- |
-| `cache.response.memory_ttl_seconds` | `300` |
-| `cache.response.memory_max_bytes` | `3800000000` |
-| `cache.response.disk_ttl_seconds` | `14400` |
-| `cache.response.disk_max_bytes` | `16000000000` |
-| `cache.response.max_body_bytes` | `67108864` |
+| 配置 | 默认 | 备注 |
+| --- | --- | --- |
+| `cache.response.memory_ttl_seconds` | **`1800`**（v1.0.12 起，原 300） | 30 分钟内重发的相同请求命中 |
+| `cache.response.memory_max_bytes` | `3800000000` | 内存层 3.8 GB 上限 |
+| `cache.response.disk_ttl_seconds` | **`86400`**（v1.0.12 起，原 14400） | 24 小时磁盘 fallback |
+| `cache.response.disk_max_bytes` | `16000000000` | 磁盘层 16 GB 上限 |
+| `cache.response.max_body_bytes` | `67108864` | 单条响应 64 MB 上限，超过不入缓存 |
+| `cache.response.semantic_key` | `true` | 启用语义化键（忽略 `cache_control`/`metadata`/`seed`/会话级 ID 等传输字段） |
+
+### 存储路径（v1.0.5 / v1.0.11 新增）
+
+| 配置 | 默认 | 引入版本 |
+| --- | --- | --- |
+| `storage.accounts_sqlite_path` | `data/accounts.sqlite` | 早期 |
+| `storage.chat_history_sqlite_path` | `data/chat_history.sqlite` | 早期 |
+| `storage.chat_history_path` | `data/chat_history.json` | 早期（旧 JSON 导入源） |
+| `storage.token_usage_sqlite_path` | `data/token_usage.sqlite` | **v1.0.5** |
+| `storage.safety_words_sqlite_path` | `data/safety_words.sqlite` | **v1.0.11** |
+| `storage.safety_ips_sqlite_path` | `data/safety_ips.sqlite` | **v1.0.11** |
+| `storage.raw_stream_sample_root` | `tests/raw_stream_samples` | 早期 |
+
+每个存储独立，可单独备份/轮转/清空。
+
+### 服务器开关（v1.0.6 / v1.0.9 新增）
+
+| 配置 | 默认 | 引入版本 | 备注 |
+| --- | --- | --- | --- |
+| `server.http_total_timeout_seconds` | `7200` | **v1.0.6** | 替代之前硬编码 120s；Pro 模型长流式必备 |
+| `server.remote_file_upload_enabled` | `false` | **v1.0.9** | 关掉时附件 inline 文本注入；打开时回退到调用上游 `upload_file`（受账号速率限制） |
+
+### 安全自动拉黑（v1.0.3 新增）
+
+| 配置 | 默认 | 备注 |
+| --- | --- | --- |
+| `safety.auto_ban.enabled` | `true`（当 `safety.enabled=true`） | 是否开启重复违规自动拉黑 |
+| `safety.auto_ban.threshold` | `3` | 滑动窗口内累计触发次数阈值 |
+| `safety.auto_ban.window_seconds` | `600` | 滑动窗口时长（秒，默认 10 分钟） |
+| `safety.allowed_ips` | `[]` | IP 白名单；命中白名单的 IP 触发违规仍被拦截但不被自动拉黑 |
+
+命中阈值的 IP 写入 `safety_ips.blocked_ips`，下次同 IP 请求直接在 IP 检查阶段被拦截，不进入内容扫描。详见 [安全说明](file://docs/security.md) v1.0.3 增量节。
+
+### `.env` CONFIG_JSON 形态（v1.0.11 起统一）
+
+`DEEPSEEK_WEB_TO_API_CONFIG_JSON` 推荐使用**单引号包裹的明文紧凑 JSON**：
+
+```bash
+DEEPSEEK_WEB_TO_API_CONFIG_JSON='{"api_keys":[...],"admin":{...},"server":{...},...}'
+DEEPSEEK_WEB_TO_API_ENV_WRITEBACK=true
+DEEPSEEK_WEB_TO_API_CONFIG_PATH=data/config.json
+```
+
+也支持 `base64:<value>` 兼容形式（管理台导出的 base64 字符串可直接粘贴）。`config.example.json` 是 `.env.example` 中 CONFIG_JSON 的展开版，二者字段集合**逐字段等价**（自动校验脚本：`python3 -c "import json,re;..."`）。
 
 **章节来源**
 - [config.example.json](file://config.example.json)

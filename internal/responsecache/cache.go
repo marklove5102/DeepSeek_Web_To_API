@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"DeepSeek_Web_To_API/internal/account"
 	"DeepSeek_Web_To_API/internal/auth"
 	"DeepSeek_Web_To_API/internal/config"
 )
@@ -30,6 +31,16 @@ const (
 	defaultMemoryMaxBytes = int64(3800 * 1000 * 1000)
 	defaultDiskMaxBytes   = int64(16 * 1000 * 1000 * 1000)
 	recordVersion         = 1
+
+	// inflightWaitTimeout bounds how long a deduplicated waiter blocks on
+	// the owner's upstream call before falling through to its own upstream
+	// dispatch. Aligned with the global HTTP total timeout (7200s default
+	// since v1.0.6) so long-reasoning Pro-model requests do NOT trigger a
+	// thundering herd of waiters dispatching duplicate upstream calls
+	// when the owner is still legitimately thinking. The owner closes the
+	// inflight slot via defer in Wrap, so panics / early returns wake
+	// every waiter immediately regardless of this ceiling.
+	inflightWaitTimeout = 2 * time.Hour
 )
 
 type CallerResolver interface {
@@ -45,6 +56,7 @@ type Options struct {
 	MaxBody        int64
 	MemoryMaxBytes int64
 	DiskMaxBytes   int64
+	SemanticKey    bool
 	OnHit          HitFunc
 }
 
@@ -62,10 +74,41 @@ type Cache struct {
 	stores         int64
 	memoryHits     int64
 	diskHits       int64
+	inflightHits   int64
 	uncacheable    map[string]int64
+	pathStats      map[string]*pathStat
 	items          map[string]memoryEntry
+	inflight       map[string]*inflightSlot
+	sessionEntries map[string]map[string]struct{}
+	sessionHits    int64
 	lastDiskSweep  time.Time
 	onHit          HitFunc
+	semanticKey    bool
+}
+
+// inflightSlot collapses concurrent identical requests onto a single
+// upstream call ("single-flight"). The owner runs the upstream handler;
+// waiters block on `done` until the owner releases. After release, waiters
+// re-check the cache and serve the freshly-stored entry. This is a major
+// component of session stickiness: when a flaky client retries an in-flight
+// request, the second arrival waits for the first to complete instead of
+// dispatching its own upstream call.
+type inflightSlot struct {
+	done chan struct{}
+}
+
+// pathStat aggregates lifecycle counters for a single canonical request
+// path. Per-path breakdown is what makes "why did the hit rate drop"
+// answerable: embeddings vs. chat completions are different workloads with
+// different ceilings, and aggregate stats hide which path is the bottleneck.
+type pathStat struct {
+	Hits         int64
+	Misses       int64
+	Stores       int64
+	MemoryHits   int64
+	DiskHits     int64
+	InflightHits int64
+	Uncacheable  map[string]int64
 }
 
 type Entry struct {
@@ -79,6 +122,12 @@ type memoryEntry struct {
 	entry           Entry
 	memoryExpiresAt time.Time
 	size            int64
+	// sessionKey ties this entry to a logical conversation as derived from
+	// (owner, body fingerprint). When a session is alive, every memory hit
+	// on ANY of its entries refreshes the lease on ALL of its entries —
+	// session-wide sliding window. Empty for shared-across-callers paths
+	// (embeddings, count_tokens) where session affinity does not apply.
+	sessionKey string
 }
 
 type diskRecord struct {
@@ -92,6 +141,25 @@ type diskRecord struct {
 }
 
 func New(opts Options) *Cache {
+	opts = normalizeOptions(opts)
+	return &Cache{
+		dir:            opts.Dir,
+		memoryTTL:      opts.MemoryTTL,
+		diskTTL:        opts.DiskTTL,
+		maxBody:        opts.MaxBody,
+		memoryMaxBytes: opts.MemoryMaxBytes,
+		diskMaxBytes:   opts.DiskMaxBytes,
+		uncacheable:    map[string]int64{},
+		pathStats:      map[string]*pathStat{},
+		items:          map[string]memoryEntry{},
+		inflight:       map[string]*inflightSlot{},
+		sessionEntries: map[string]map[string]struct{}{},
+		onHit:          opts.OnHit,
+		semanticKey:    opts.SemanticKey,
+	}
+}
+
+func normalizeOptions(opts Options) Options {
 	memoryTTL := opts.MemoryTTL
 	if memoryTTL <= 0 {
 		memoryTTL = defaultMemoryTTL
@@ -116,17 +184,44 @@ func New(opts Options) *Cache {
 	if dir == "" {
 		dir = config.ResponseCacheDir()
 	}
-	return &Cache{
-		dir:            filepath.Clean(dir),
-		memoryTTL:      memoryTTL,
-		diskTTL:        diskTTL,
-		maxBody:        maxBody,
-		memoryMaxBytes: memoryMaxBytes,
-		diskMaxBytes:   diskMaxBytes,
-		uncacheable:    map[string]int64{},
-		items:          map[string]memoryEntry{},
-		onHit:          opts.OnHit,
+	opts.Dir = filepath.Clean(dir)
+	opts.MemoryTTL = memoryTTL
+	opts.DiskTTL = diskTTL
+	opts.MaxBody = maxBody
+	opts.MemoryMaxBytes = memoryMaxBytes
+	opts.DiskMaxBytes = diskMaxBytes
+	return opts
+}
+
+func (c *Cache) ApplyOptions(opts Options) {
+	if c == nil {
+		return
 	}
+	opts = normalizeOptions(opts)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.dir = opts.Dir
+	c.memoryTTL = opts.MemoryTTL
+	c.diskTTL = opts.DiskTTL
+	c.maxBody = opts.MaxBody
+	c.memoryMaxBytes = opts.MemoryMaxBytes
+	c.diskMaxBytes = opts.DiskMaxBytes
+	c.semanticKey = opts.SemanticKey
+	if opts.OnHit != nil {
+		c.onHit = opts.OnHit
+	}
+
+	c.items = map[string]memoryEntry{}
+	c.memoryBytes = 0
+	c.lastDiskSweep = time.Time{}
+	if c.pathStats == nil {
+		c.pathStats = map[string]*pathStat{}
+	}
+	if c.inflight == nil {
+		c.inflight = map[string]*inflightSlot{}
+	}
+	c.sessionEntries = map[string]map[string]struct{}{}
 }
 
 func (c *Cache) Middleware(resolver CallerResolver) func(http.Handler) http.Handler {
@@ -164,19 +259,30 @@ func (c *Cache) Wrap(resolver CallerResolver, next http.Handler) http.Handler {
 		}
 		r.Body = io.NopCloser(bytes.NewReader(rawBody))
 
+		policy := pathPolicyFor(canonicalRequestPath(r.URL.Path))
+
 		owner := ""
 		if resolver != nil {
 			if a, authErr := resolver.DetermineCaller(r); authErr == nil && a != nil {
 				owner = strings.TrimSpace(a.CallerID)
 			}
 		}
-		if owner == "" {
+		// For per-caller paths (LLM completions) we still require a resolved
+		// caller — leaking a sampled response across tenants is a privacy
+		// boundary. For shared paths (embeddings, count_tokens) the entry is
+		// a deterministic function of the body alone, so an unresolved
+		// caller is fine.
+		if !policy.SharedAcrossCallers && owner == "" {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		key := RequestKey(r, owner, rawBody)
-		if entry, source, ok := c.Get(key); ok {
+		key := c.requestKeyWithPolicy(r, owner, rawBody, policy)
+		sessionKey := ""
+		if !policy.SharedAcrossCallers && owner != "" {
+			sessionKey = account.SessionKey(sha256.Sum256([]byte(owner)), rawBody)
+		}
+		if entry, source, ok := c.getWithPolicy(key, policy); ok {
 			if c.onHit != nil {
 				c.onHit(r, cloneEntry(entry), source)
 			}
@@ -184,15 +290,82 @@ func (c *Cache) Wrap(resolver CallerResolver, next http.Handler) http.Handler {
 			return
 		}
 
+		// Single-flight: if another request with this exact cache key is
+		// already running upstream, wait for its result instead of
+		// dispatching a duplicate. This is the second arm of the session
+		// stickiness contract — flaky-client retries during streaming
+		// collapse onto the in-flight call.
+		slot, isOwner := c.acquireInflight(key)
+		if !isOwner {
+			waited, served := c.waitForInflightOwner(w, r, slot, key, policy)
+			if served {
+				return
+			}
+			if !waited {
+				return
+			}
+			// Owner finished but did not produce a cacheable entry, OR we
+			// timed out. Try to claim ownership ourselves before falling
+			// through to upstream — if we succeed, subsequent waiters
+			// (including any other timed-out ones) collapse onto us
+			// instead of all stampeding the LLM backend simultaneously.
+			slot, isOwner = c.acquireInflight(key)
+			if !isOwner {
+				// Another goroutine became the owner while we were
+				// waking up. Wait on it once more with a fresh budget.
+				waited, served = c.waitForInflightOwner(w, r, slot, key, policy)
+				if served {
+					return
+				}
+				if !waited {
+					return
+				}
+				// Two sequential owners both produced nothing cacheable
+				// — at this point we accept the fall-through and run
+				// upstream ourselves without holding the slot.
+			}
+		}
+
 		r.Body = io.NopCloser(bytes.NewReader(rawBody))
 		cw := newCaptureResponseWriter(w, c.maxBody)
+		if isOwner {
+			defer c.releaseInflight(key)
+		}
 		next.ServeHTTP(cw, r)
 		if entry, ok, reason := cw.cacheEntry(); ok {
-			c.Set(key, entry)
+			c.setWithPolicySession(key, sessionKey, entry, policy)
 		} else {
-			c.recordUncacheable(reason)
+			c.recordUncacheable(policy.Path, reason)
 		}
 	})
+}
+
+// waitForInflightOwner blocks the caller until the in-flight owner closes
+// the slot's done channel, the wait times out, or the client cancels.
+// Returns (continueToUpstream, alreadyServed). When the owner produced a
+// cacheable response, the function serves it from cache and returns
+// (false, true). When the wait times out or the owner produced nothing
+// cacheable, returns (true, false) so Wrap falls through to upstream. When
+// the client cancelled, returns (false, false) so Wrap aborts cleanly.
+func (c *Cache) waitForInflightOwner(w http.ResponseWriter, r *http.Request, slot *inflightSlot, key string, policy pathPolicy) (continueUpstream, alreadyServed bool) {
+	timer := time.NewTimer(inflightWaitTimeout)
+	defer timer.Stop()
+	select {
+	case <-slot.done:
+		if entry, source, ok := c.getWithPolicy(key, policy); ok {
+			c.recordInflightHit(policy.Path)
+			if c.onHit != nil {
+				c.onHit(r, cloneEntry(entry), source)
+			}
+			writeCachedResponse(w, entry, source)
+			return false, true
+		}
+		return true, false
+	case <-timer.C:
+		return true, false
+	case <-r.Context().Done():
+		return false, false
+	}
 }
 
 func CacheableRequest(r *http.Request) bool {
@@ -217,10 +390,36 @@ func CacheableRequest(r *http.Request) bool {
 }
 
 func RequestKey(r *http.Request, owner string, body []byte) string {
+	policy := pathPolicy{}
+	if r != nil && r.URL != nil {
+		policy = pathPolicyFor(canonicalRequestPath(r.URL.Path))
+	}
+	return requestKey(r, owner, body, true, policy)
+}
+
+func (c *Cache) requestKeyWithPolicy(r *http.Request, owner string, body []byte, policy pathPolicy) string {
+	if c == nil {
+		return requestKey(r, owner, body, true, policy)
+	}
+	return requestKey(r, owner, body, c.semanticKey, policy)
+}
+
+func requestKey(r *http.Request, owner string, body []byte, semanticKey bool, policy pathPolicy) string {
 	h := sha256.New()
-	body = canonicalRequestBodyForKey(r, body)
-	writeKeyPart(h, "v1")
-	writeKeyPart(h, strings.TrimSpace(owner))
+	body = canonicalRequestBodyForKey(r, body, semanticKey)
+	version := "v1"
+	if semanticKey {
+		version = "v2-semantic"
+	}
+	writeKeyPart(h, version)
+	// Shared paths intentionally omit the owner from the key so the same
+	// deterministic body produces the same key across API keys; per-caller
+	// paths keep the owner as a hard tenant boundary.
+	if policy.SharedAcrossCallers {
+		writeKeyPart(h, "shared")
+	} else {
+		writeKeyPart(h, strings.TrimSpace(owner))
+	}
 	if r != nil {
 		writeKeyPart(h, strings.ToUpper(strings.TrimSpace(r.Method)))
 		if r.URL != nil {
@@ -236,7 +435,7 @@ func RequestKey(r *http.Request, owner string, body []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func canonicalRequestBodyForKey(r *http.Request, body []byte) []byte {
+func canonicalRequestBodyForKey(r *http.Request, body []byte, semanticKey bool) []byte {
 	if len(body) == 0 || !cacheKeyShouldNormalizeJSON(r) {
 		return body
 	}
@@ -250,7 +449,7 @@ func canonicalRequestBodyForKey(r *http.Request, body []byte) []byte {
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return body
 	}
-	value, keep := normalizeCacheKeyJSONValue(value, true)
+	value, keep := normalizeCacheKeyJSONValue(value, true, "", semanticKey)
 	if !keep {
 		return body
 	}
@@ -276,7 +475,7 @@ func isJSONContentType(raw string) bool {
 	return raw == "application/json" || strings.Contains(raw, "+json") || strings.Contains(raw, "/json")
 }
 
-func normalizeCacheKeyJSONValue(value any, topLevel bool) (any, bool) {
+func normalizeCacheKeyJSONValue(value any, topLevel bool, key string, semanticKey bool) (any, bool) {
 	switch v := value.(type) {
 	case map[string]any:
 		if cacheKeyMapShouldDrop(v) {
@@ -284,10 +483,10 @@ func normalizeCacheKeyJSONValue(value any, topLevel bool) (any, bool) {
 		}
 		out := make(map[string]any, len(v))
 		for key, item := range v {
-			if ignoredCacheKeyField(key, topLevel) {
+			if ignoredCacheKeyField(key, topLevel, semanticKey) {
 				continue
 			}
-			normalized, keep := normalizeCacheKeyJSONValue(item, false)
+			normalized, keep := normalizeCacheKeyJSONValue(item, false, key, semanticKey)
 			if !keep {
 				continue
 			}
@@ -297,13 +496,21 @@ func normalizeCacheKeyJSONValue(value any, topLevel bool) (any, bool) {
 	case []any:
 		out := make([]any, 0, len(v))
 		for i := range v {
-			normalized, keep := normalizeCacheKeyJSONValue(v[i], false)
+			normalized, keep := normalizeCacheKeyJSONValue(v[i], false, key, semanticKey)
 			if !keep {
 				continue
 			}
 			out = append(out, normalized)
 		}
 		return out, true
+	case string:
+		if semanticKey && semanticStringKey(key) {
+			return normalizeSemanticString(v), true
+		}
+		if semanticKey && semanticLowerStringKey(key) {
+			return strings.ToLower(strings.TrimSpace(v)), true
+		}
+		return value, true
 	default:
 		return value, true
 	}
@@ -314,10 +521,17 @@ func cacheKeyMapShouldDrop(value map[string]any) bool {
 	return strings.EqualFold(strings.TrimSpace(typ), "cache_edits")
 }
 
-func ignoredCacheKeyField(key string, topLevel bool) bool {
+func ignoredCacheKeyField(key string, topLevel bool, semanticKey bool) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
 	case "cache_control", "cache_reference", "context_management":
 		return true
+	}
+	if semanticKey {
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "id", "call_id", "tool_call_id", "tool_use_id", "message_id", "request_id", "trace_id", "event_id",
+			"conversation_id", "conversationid", "chat_id", "chatid", "thread_id", "threadid", "session_id", "sessionid":
+			return true
+		}
 	}
 	if !topLevel {
 		return false
@@ -330,7 +544,44 @@ func ignoredCacheKeyField(key string, topLevel bool) bool {
 	}
 }
 
+func semanticStringKey(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "content", "text", "input", "prompt", "query", "instructions", "system":
+		return true
+	default:
+		return false
+	}
+}
+
+func semanticLowerStringKey(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "role", "type":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeSemanticString(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	fields := strings.Fields(raw)
+	if len(fields) <= 1 {
+		return raw
+	}
+	return strings.Join(fields, " ")
+}
+
+// Get is a backward-compatible wrapper that uses no path policy. It is kept
+// for external callers that look up entries without protocol-path context;
+// the in-package middleware always goes through getWithPolicy.
 func (c *Cache) Get(key string) (Entry, string, bool) {
+	return c.getWithPolicy(key, pathPolicy{})
+}
+
+func (c *Cache) getWithPolicy(key string, policy pathPolicy) (Entry, string, bool) {
 	key = normalizeKey(key)
 	if key == "" {
 		return Entry{}, "", false
@@ -341,41 +592,146 @@ func (c *Cache) Get(key string) (Entry, string, bool) {
 	if item, ok := c.items[key]; ok {
 		if now.Before(item.memoryExpiresAt) && now.Before(item.entry.DiskExpiresAt) {
 			entry := cloneEntry(item.entry)
-			c.recordHitLocked("memory")
+			c.bumpMemoryExpiryLocked(key, now, policy)
+			c.recordHitLocked(policy.Path, "memory")
 			c.mu.Unlock()
 			return entry, "memory", true
 		}
+		c.memoryBytes -= item.size
+		c.removeFromSessionLocked(item.sessionKey, key)
 		delete(c.items, key)
 	}
 	c.mu.Unlock()
 
 	entry, ok := c.getDisk(key, now)
 	if !ok {
-		c.recordMiss()
+		c.recordMiss(policy.Path)
 		return Entry{}, "", false
 	}
-	c.putMemory(key, entry, now)
-	c.recordHit("disk")
+	c.putMemoryWithPolicySession(key, "", entry, now, policy)
+	c.recordHit(policy.Path, "disk")
 	return cloneEntry(entry), "disk", true
 }
 
+// bumpMemoryExpiryLocked extends a memory entry's lease on access ("sliding
+// window TTL"). Active conversations that keep hitting the same prefix —
+// e.g., long-context coding agents that retry within a turn, or clients
+// that re-issue identical tool calls — keep their entry hot beyond the
+// initial memoryTTL. The extension is capped by the entry's disk
+// expiration: once disk has expired, the cache row is logically dead even
+// if memory keeps requesting it. When the entry belongs to a logical
+// session (sessionKey is set), every sibling entry of that session ALSO
+// gets its lease refreshed — that is the session-wide stickiness contract:
+// activity on any turn keeps every cached turn of the same conversation
+// hot together. Callers must hold c.mu.
+func (c *Cache) bumpMemoryExpiryLocked(key string, now time.Time, policy pathPolicy) {
+	item, ok := c.items[key]
+	if !ok {
+		return
+	}
+	memoryTTL := c.memoryTTL
+	if policy.MemoryTTL > 0 {
+		memoryTTL = policy.MemoryTTL
+	}
+	if memoryTTL <= 0 {
+		return
+	}
+	c.bumpSingleEntryExpiryLocked(key, item, now, memoryTTL)
+	if item.sessionKey == "" {
+		return
+	}
+	siblings, ok := c.sessionEntries[item.sessionKey]
+	if !ok || len(siblings) <= 1 {
+		return
+	}
+	for siblingKey := range siblings {
+		if siblingKey == key {
+			continue
+		}
+		sibling, ok := c.items[siblingKey]
+		if !ok {
+			continue
+		}
+		c.bumpSingleEntryExpiryLocked(siblingKey, sibling, now, memoryTTL)
+	}
+	c.sessionHits++
+}
+
+func (c *Cache) bumpSingleEntryExpiryLocked(key string, item memoryEntry, now time.Time, memoryTTL time.Duration) {
+	extended := now.Add(memoryTTL)
+	if item.entry.DiskExpiresAt.Before(extended) {
+		extended = item.entry.DiskExpiresAt
+	}
+	if extended.After(item.memoryExpiresAt) {
+		item.memoryExpiresAt = extended
+		c.items[key] = item
+	}
+}
+
+// addToSessionLocked links a cache key to a logical session bucket. Empty
+// sessionKey is a no-op (the entry is unsessioned). Callers must hold c.mu.
+func (c *Cache) addToSessionLocked(sessionKey, cacheKey string) {
+	if sessionKey == "" || cacheKey == "" {
+		return
+	}
+	if c.sessionEntries == nil {
+		c.sessionEntries = map[string]map[string]struct{}{}
+	}
+	bucket, ok := c.sessionEntries[sessionKey]
+	if !ok {
+		bucket = map[string]struct{}{}
+		c.sessionEntries[sessionKey] = bucket
+	}
+	bucket[cacheKey] = struct{}{}
+}
+
+// removeFromSessionLocked unlinks a cache key from its session bucket and
+// drops the bucket if empty. Empty sessionKey is a no-op. Callers must hold
+// c.mu.
+func (c *Cache) removeFromSessionLocked(sessionKey, cacheKey string) {
+	if sessionKey == "" || cacheKey == "" {
+		return
+	}
+	bucket, ok := c.sessionEntries[sessionKey]
+	if !ok {
+		return
+	}
+	delete(bucket, cacheKey)
+	if len(bucket) == 0 {
+		delete(c.sessionEntries, sessionKey)
+	}
+}
+
+// Set is a backward-compatible wrapper that uses no path policy (the global
+// memory/disk TTLs apply). External callers that don't carry path context
+// can keep using this; the in-package middleware always routes through
+// setWithPolicySession so per-path TTL overrides and session linkage take
+// effect.
 func (c *Cache) Set(key string, entry Entry) {
+	c.setWithPolicySession(key, "", entry, pathPolicy{})
+}
+
+func (c *Cache) setWithPolicySession(key, sessionKey string, entry Entry, policy pathPolicy) {
 	key = normalizeKey(key)
 	if key == "" || !entry.cacheable(c.maxBody) {
 		return
 	}
 	now := time.Now()
+	diskTTL := c.diskTTL
+	if policy.DiskTTL > 0 {
+		diskTTL = policy.DiskTTL
+	}
 	if entry.DiskExpiresAt.IsZero() || !entry.DiskExpiresAt.After(now) {
-		entry.DiskExpiresAt = now.Add(c.diskTTL)
+		entry.DiskExpiresAt = now.Add(diskTTL)
 	}
 	entry = cloneEntry(entry)
-	c.putMemory(key, entry, now)
+	c.putMemoryWithPolicySession(key, sessionKey, entry, now, policy)
 	if err := c.putDisk(key, entry, now); err != nil {
 		config.Logger.Warn("[response_cache] disk write failed", "error", err)
 	} else {
 		c.enforceDiskLimit(now)
 	}
-	c.recordStore()
+	c.recordStore(policy.Path)
 	c.maybeSweepDisk(now)
 }
 
@@ -444,7 +800,7 @@ func canonicalRequestPath(path string) string {
 	}
 }
 
-func (c *Cache) putMemory(key string, entry Entry, now time.Time) {
+func (c *Cache) putMemoryWithPolicySession(key, sessionKey string, entry Entry, now time.Time, policy pathPolicy) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sweepMemoryLocked(now)
@@ -452,16 +808,47 @@ func (c *Cache) putMemory(key string, entry Entry, now time.Time) {
 	if c.memoryMaxBytes > 0 && size > c.memoryMaxBytes {
 		return
 	}
-	expiresAt := now.Add(c.memoryTTL)
+	memoryTTL := c.memoryTTL
+	if policy.MemoryTTL > 0 {
+		memoryTTL = policy.MemoryTTL
+	}
+	expiresAt := now.Add(memoryTTL)
 	if entry.DiskExpiresAt.Before(expiresAt) {
 		expiresAt = entry.DiskExpiresAt
 	}
 	if expiresAt.After(now) {
 		if old, ok := c.items[key]; ok {
 			c.memoryBytes -= old.size
+			if old.sessionKey != "" && old.sessionKey != sessionKey {
+				c.removeFromSessionLocked(old.sessionKey, key)
+			}
 		}
-		c.items[key] = memoryEntry{entry: cloneEntry(entry), memoryExpiresAt: expiresAt, size: size}
+		c.items[key] = memoryEntry{
+			entry:           cloneEntry(entry),
+			memoryExpiresAt: expiresAt,
+			size:            size,
+			sessionKey:      sessionKey,
+		}
 		c.memoryBytes += size
+		c.addToSessionLocked(sessionKey, key)
+		// Storing a new entry IS session activity. Refresh sibling leases
+		// so a long-running conversation's earlier turns do not get swept
+		// out from under it just because a new turn took longer than
+		// memoryTTL to arrive.
+		if sessionKey != "" {
+			if siblings, ok := c.sessionEntries[sessionKey]; ok {
+				for siblingKey := range siblings {
+					if siblingKey == key {
+						continue
+					}
+					sibling, ok := c.items[siblingKey]
+					if !ok {
+						continue
+					}
+					c.bumpSingleEntryExpiryLocked(siblingKey, sibling, now, memoryTTL)
+				}
+			}
+		}
 		c.enforceMemoryLimitLocked()
 	}
 }
@@ -471,6 +858,7 @@ func (c *Cache) sweepMemoryLocked(now time.Time) {
 		if !now.Before(item.memoryExpiresAt) || !now.Before(item.entry.DiskExpiresAt) {
 			delete(c.items, key)
 			c.memoryBytes -= item.size
+			c.removeFromSessionLocked(item.sessionKey, key)
 		}
 	}
 	if c.memoryBytes < 0 {
@@ -479,35 +867,57 @@ func (c *Cache) sweepMemoryLocked(now time.Time) {
 }
 
 func (c *Cache) enforceMemoryLimitLocked() {
-	if c.memoryMaxBytes <= 0 {
+	if c.memoryMaxBytes <= 0 || c.memoryBytes <= c.memoryMaxBytes {
 		return
 	}
-	for c.memoryBytes > c.memoryMaxBytes && len(c.items) > 0 {
-		var oldestKey string
-		var oldest memoryEntry
-		first := true
-		for key, item := range c.items {
-			if first || item.memoryExpiresAt.Before(oldest.memoryExpiresAt) {
-				oldestKey = key
-				oldest = item
-				first = false
-			}
+	// Replace the previous O(N²) "scan to find oldest, delete, repeat"
+	// loop with a single O(N log N) sort. Under sustained store pressure
+	// the old version was a measurable DoS vector — an attacker with
+	// caller-bound write access could drive the cache into the eviction
+	// path on every store and pay len(items) per eviction. With an
+	// up-front sort the eviction-loop cost amortizes: one sort + linear
+	// walk down the list until memoryBytes is back under the cap.
+	type evictCandidate struct {
+		key       string
+		expiresAt time.Time
+		size      int64
+		session   string
+	}
+	candidates := make([]evictCandidate, 0, len(c.items))
+	for key, item := range c.items {
+		candidates = append(candidates, evictCandidate{
+			key:       key,
+			expiresAt: item.memoryExpiresAt,
+			size:      item.size,
+			session:   item.sessionKey,
+		})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].expiresAt.Before(candidates[j].expiresAt)
+	})
+	for _, cand := range candidates {
+		if c.memoryBytes <= c.memoryMaxBytes {
+			break
 		}
-		delete(c.items, oldestKey)
-		c.memoryBytes -= oldest.size
+		if _, ok := c.items[cand.key]; !ok {
+			continue
+		}
+		delete(c.items, cand.key)
+		c.memoryBytes -= cand.size
+		c.removeFromSessionLocked(cand.session, cand.key)
 	}
 	if c.memoryBytes < 0 {
 		c.memoryBytes = 0
 	}
 }
 
-func (c *Cache) recordHit(source string) {
+func (c *Cache) recordHit(path, source string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.recordHitLocked(source)
+	c.recordHitLocked(path, source)
 }
 
-func (c *Cache) recordHitLocked(source string) {
+func (c *Cache) recordHitLocked(path, source string) {
 	c.hits++
 	switch source {
 	case "memory":
@@ -515,21 +925,81 @@ func (c *Cache) recordHitLocked(source string) {
 	case "disk":
 		c.diskHits++
 	}
+	stat := c.pathStatLocked(path)
+	if stat == nil {
+		return
+	}
+	stat.Hits++
+	switch source {
+	case "memory":
+		stat.MemoryHits++
+	case "disk":
+		stat.DiskHits++
+	}
 }
 
-func (c *Cache) recordMiss() {
+func (c *Cache) recordMiss(path string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.misses++
+	if stat := c.pathStatLocked(path); stat != nil {
+		stat.Misses++
+	}
 }
 
-func (c *Cache) recordStore() {
+func (c *Cache) recordStore(path string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.stores++
+	if stat := c.pathStatLocked(path); stat != nil {
+		stat.Stores++
+	}
 }
 
-func (c *Cache) recordUncacheable(reason string) {
+func (c *Cache) recordInflightHit(path string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.inflightHits++
+	if stat := c.pathStatLocked(path); stat != nil {
+		stat.InflightHits++
+		stat.Hits++
+	}
+	c.hits++
+}
+
+// acquireInflight registers the caller as the owner of a single-flight slot
+// when no other request is in flight for the same key, or returns the
+// existing slot for the caller to wait on. Returns (slot, isOwner). Owners
+// MUST call releaseInflight in a defer so waiters can wake.
+func (c *Cache) acquireInflight(key string) (*inflightSlot, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.inflight == nil {
+		c.inflight = map[string]*inflightSlot{}
+	}
+	if slot, ok := c.inflight[key]; ok {
+		return slot, false
+	}
+	slot := &inflightSlot{done: make(chan struct{})}
+	c.inflight[key] = slot
+	return slot, true
+}
+
+// releaseInflight closes the slot's done channel and removes it from the
+// in-flight map. Safe to call multiple times — the second call is a no-op.
+func (c *Cache) releaseInflight(key string) {
+	c.mu.Lock()
+	slot, ok := c.inflight[key]
+	if !ok {
+		c.mu.Unlock()
+		return
+	}
+	delete(c.inflight, key)
+	c.mu.Unlock()
+	close(slot.done)
+}
+
+func (c *Cache) recordUncacheable(path, reason string) {
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		reason = "unknown"
@@ -540,6 +1010,33 @@ func (c *Cache) recordUncacheable(reason string) {
 		c.uncacheable = map[string]int64{}
 	}
 	c.uncacheable[reason]++
+	stat := c.pathStatLocked(path)
+	if stat == nil {
+		return
+	}
+	if stat.Uncacheable == nil {
+		stat.Uncacheable = map[string]int64{}
+	}
+	stat.Uncacheable[reason]++
+}
+
+// pathStatLocked returns the per-path counter bucket, lazily creating it on
+// first touch. Must be called with c.mu held. Returns nil for empty paths so
+// callers can opt out cleanly when path is not known.
+func (c *Cache) pathStatLocked(path string) *pathStat {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	if c.pathStats == nil {
+		c.pathStats = map[string]*pathStat{}
+	}
+	stat, ok := c.pathStats[path]
+	if !ok {
+		stat = &pathStat{Uncacheable: map[string]int64{}}
+		c.pathStats[path] = stat
+	}
+	return stat
 }
 
 func (c *Cache) putDisk(key string, entry Entry, now time.Time) error {
@@ -682,30 +1179,39 @@ type diskCacheFile struct {
 }
 
 func (c *Cache) enforceDiskLimit(now time.Time) {
-	if c.dir == "" || c.diskMaxBytes <= 0 {
+	c.mu.Lock()
+	dir := c.dir
+	diskTTL := c.diskTTL
+	maxBytes := c.diskMaxBytes
+	c.mu.Unlock()
+	if dir == "" || maxBytes <= 0 {
 		return
 	}
-	files, total := c.diskFiles(now)
-	if total <= c.diskMaxBytes {
+	files, total := c.diskFilesAt(dir, diskTTL, now)
+	if total <= maxBytes {
 		return
 	}
 	sort.Slice(files, func(i, j int) bool {
 		return files[i].modTime.Before(files[j].modTime)
 	})
 	for _, file := range files {
-		if total <= c.diskMaxBytes {
+		if total <= maxBytes {
 			return
 		}
-		if err := removeDiskCacheFile(c.dir, file.path); err == nil {
+		if err := removeDiskCacheFile(dir, file.path); err == nil {
 			total -= file.size
 		}
 	}
 }
 
-func (c *Cache) diskFiles(now time.Time) ([]diskCacheFile, int64) {
+// diskFilesAt walks the cache directory using a snapshot of (dir, diskTTL)
+// captured under c.mu by the caller. Reading these from the Cache struct
+// directly inside the WalkDir callback is racy with ApplyOptions hot
+// reload, which mutates them under the same mutex.
+func (c *Cache) diskFilesAt(dir string, diskTTL time.Duration, now time.Time) ([]diskCacheFile, int64) {
 	files := []diskCacheFile{}
 	var total int64
-	_ = filepath.WalkDir(c.dir, func(path string, d os.DirEntry, err error) error {
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d == nil || d.IsDir() || !strings.HasSuffix(path, ".json.gz") {
 			return nil
 		}
@@ -713,8 +1219,8 @@ func (c *Cache) diskFiles(now time.Time) ([]diskCacheFile, int64) {
 		if statErr != nil {
 			return nil
 		}
-		if c.diskTTL > 0 && now.Sub(info.ModTime()) > c.diskTTL {
-			_ = removeDiskCacheFile(c.dir, path)
+		if diskTTL > 0 && now.Sub(info.ModTime()) > diskTTL {
+			_ = removeDiskCacheFile(dir, path)
 			return nil
 		}
 		size := info.Size()
@@ -1085,24 +1591,71 @@ func (c *Cache) Stats() map[string]any {
 		"uncacheable_misses": uncacheableTotal,
 		"memory_hits":        c.memoryHits,
 		"disk_hits":          c.diskHits,
+		"inflight_hits":      c.inflightHits,
+		"inflight_pending":   len(c.inflight),
+		"session_hits":       c.sessionHits,
+		"active_sessions":    len(c.sessionEntries),
 		"memory_items":       len(c.items),
 		"memory_bytes":       c.memoryBytes,
 		"memory_max_bytes":   c.memoryMaxBytes,
+		"max_body_bytes":     c.maxBody,
 		"memory_ttl_seconds": int(c.memoryTTL.Seconds()),
 		"disk_ttl_seconds":   int(c.diskTTL.Seconds()),
 		"disk_max_bytes":     c.diskMaxBytes,
 		"disk_dir":           c.dir,
 		"compression":        "gzip",
+		"semantic_key":       c.semanticKey,
 	}
 	for reason, count := range c.uncacheable {
 		out["uncacheable_"+reason] = count
 	}
+	if len(c.pathStats) > 0 {
+		paths := make(map[string]any, len(c.pathStats))
+		for path, stat := range c.pathStats {
+			pathLookups := stat.Hits + stat.Misses
+			pathCacheableLookups := stat.Hits + stat.Stores
+			uncacheableSum := int64(0)
+			for _, count := range stat.Uncacheable {
+				uncacheableSum += count
+			}
+			pathOut := map[string]any{
+				"lookups":            pathLookups,
+				"hits":               stat.Hits,
+				"misses":             stat.Misses,
+				"stores":             stat.Stores,
+				"memory_hits":        stat.MemoryHits,
+				"disk_hits":          stat.DiskHits,
+				"inflight_hits":      stat.InflightHits,
+				"cacheable_lookups":  pathCacheableLookups,
+				"cacheable_misses":   stat.Stores,
+				"uncacheable_misses": uncacheableSum,
+				"hit_rate":           safeRate(stat.Hits, pathLookups),
+				"cacheable_hit_rate": safeRate(stat.Hits, pathCacheableLookups),
+				"shared":             pathPolicyFor(path).SharedAcrossCallers,
+			}
+			for reason, count := range stat.Uncacheable {
+				pathOut["uncacheable_"+reason] = count
+			}
+			paths[path] = pathOut
+		}
+		out["paths"] = paths
+	}
 	return out
+}
+
+// safeRate returns hits/total rounded to 4 decimals, or 0 when total is zero.
+func safeRate(hits, total int64) float64 {
+	if total <= 0 {
+		return 0
+	}
+	r := float64(hits) / float64(total)
+	// Round to 4 decimal places to avoid jitter in admin UI rendering.
+	return float64(int64(r*10000)) / 10000
 }
 
 func (c *Cache) String() string {
 	if c == nil {
 		return "response cache disabled"
 	}
-	return fmt.Sprintf("response cache memory=%s memory_max=%d disk=%s disk_max=%d dir=%s compression=gzip", c.memoryTTL, c.memoryMaxBytes, c.diskTTL, c.diskMaxBytes, c.dir)
+	return fmt.Sprintf("response cache memory=%s memory_max=%d disk=%s disk_max=%d dir=%s compression=gzip semantic_key=%t", c.memoryTTL, c.memoryMaxBytes, c.diskTTL, c.diskMaxBytes, c.dir, c.semanticKey)
 }

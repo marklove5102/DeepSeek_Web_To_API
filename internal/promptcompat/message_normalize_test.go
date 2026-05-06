@@ -451,3 +451,43 @@ func TestRepairOpenAIToolMessagesHandlesAnthropicStyleBlocks(t *testing.T) {
 		t.Fatalf("expected assistant text and tool call history preserved, got %q", normalized[0]["content"])
 	}
 }
+
+func TestRepairOpenAIToolMessagesHandlesCodexOpenCodeVariants(t *testing.T) {
+	raw := []any{
+		map[string]any{
+			"type":           "toolCall",
+			"callId":         "tool-call-1",
+			"recipient_name": "shell_command",
+			"parameters":     map[string]any{"command": "pwd"},
+		},
+		map[string]any{
+			"type":       "tool_output",
+			"toolCallId": "tool-call-1",
+			"observation": map[string]any{
+				"stdout": "/repo",
+			},
+		},
+	}
+
+	repaired := repairOpenAIToolMessages(raw)
+	if len(repaired) != 2 {
+		t.Fatalf("expected two repaired messages, got %#v", repaired)
+	}
+	assistant, ok := repaired[0].(map[string]any)
+	if !ok || assistant["role"] != "assistant" {
+		t.Fatalf("expected assistant tool call, got %#v", repaired[0])
+	}
+	calls, ok := assistant["tool_calls"].([]any)
+	if !ok || len(calls) != 1 {
+		t.Fatalf("expected one tool call, got %#v", assistant["tool_calls"])
+	}
+	call := calls[0].(map[string]any)
+	fn := call["function"].(map[string]any)
+	if call["id"] != "tool-call-1" || fn["name"] != "shell_command" || !strings.Contains(fn["arguments"].(string), "pwd") {
+		t.Fatalf("unexpected repaired call: %#v", call)
+	}
+	toolMsg, ok := repaired[1].(map[string]any)
+	if !ok || toolMsg["role"] != "tool" || toolMsg["tool_call_id"] != "tool-call-1" {
+		t.Fatalf("expected tool output repaired, got %#v", repaired[1])
+	}
+}

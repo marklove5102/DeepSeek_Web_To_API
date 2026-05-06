@@ -8,7 +8,16 @@ import (
 
 	authn "DeepSeek_Web_To_API/internal/auth"
 	"DeepSeek_Web_To_API/internal/config"
+	"DeepSeek_Web_To_API/internal/responsecache"
+	"DeepSeek_Web_To_API/internal/safetystore"
 )
+
+// mirrorWarn logs a non-fatal failure when mirroring a config write into one
+// of the dedicated safety SQLite stores. The config-side write succeeds
+// regardless so the request itself is never blocked by sqlite I/O.
+func mirrorWarn(scope string, err error) {
+	config.Logger.Warn("[admin_settings_safety_mirror] write failed", "scope", scope, "error", err)
+}
 
 func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 	var req map[string]any
@@ -17,7 +26,7 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	adminCfg, runtimeCfg, compatCfg, responsesCfg, embeddingsCfg, autoDeleteCfg, currentInputCfg, thinkingInjCfg, aliasMap, err := parseSettingsUpdateRequest(req)
+	adminCfg, runtimeCfg, compatCfg, responsesCfg, embeddingsCfg, cacheCfg, autoDeleteCfg, currentInputCfg, thinkingInjCfg, safetyCfg, aliasMap, err := parseSettingsUpdateRequest(req)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"detail": err.Error()})
 		return
@@ -32,6 +41,13 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 	currentInputMinCharsSet := hasNestedSettingsKey(req, "current_input_file", "min_chars")
 	thinkingInjectionEnabledSet := hasNestedSettingsKey(req, "thinking_injection", "enabled")
 	thinkingInjectionPromptSet := hasNestedSettingsKey(req, "thinking_injection", "prompt")
+	cacheDirSet := hasNestedSettingsPath(req, "cache", "response", "dir")
+	cacheMemoryTTLSet := hasNestedSettingsPath(req, "cache", "response", "memory_ttl_seconds")
+	cacheDiskTTLSet := hasNestedSettingsPath(req, "cache", "response", "disk_ttl_seconds")
+	cacheMaxBodySet := hasNestedSettingsPath(req, "cache", "response", "max_body_bytes")
+	cacheMemoryMaxSet := hasNestedSettingsPath(req, "cache", "response", "memory_max_bytes")
+	cacheDiskMaxSet := hasNestedSettingsPath(req, "cache", "response", "disk_max_bytes")
+	cacheSemanticSet := hasNestedSettingsPath(req, "cache", "response", "semantic_key")
 
 	if err := h.Store.Update(func(c *config.Config) error {
 		if adminCfg != nil {
@@ -67,6 +83,29 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 		if embeddingsCfg != nil && strings.TrimSpace(embeddingsCfg.Provider) != "" {
 			c.Embeddings.Provider = strings.TrimSpace(embeddingsCfg.Provider)
 		}
+		if cacheCfg != nil {
+			if cacheDirSet {
+				c.Cache.Response.Dir = strings.TrimSpace(cacheCfg.Response.Dir)
+			}
+			if cacheMemoryTTLSet {
+				c.Cache.Response.MemoryTTLSeconds = cacheCfg.Response.MemoryTTLSeconds
+			}
+			if cacheDiskTTLSet {
+				c.Cache.Response.DiskTTLSeconds = cacheCfg.Response.DiskTTLSeconds
+			}
+			if cacheMaxBodySet {
+				c.Cache.Response.MaxBodyBytes = cacheCfg.Response.MaxBodyBytes
+			}
+			if cacheMemoryMaxSet {
+				c.Cache.Response.MemoryMaxBytes = cacheCfg.Response.MemoryMaxBytes
+			}
+			if cacheDiskMaxSet {
+				c.Cache.Response.DiskMaxBytes = cacheCfg.Response.DiskMaxBytes
+			}
+			if cacheSemanticSet {
+				c.Cache.Response.SemanticKey = cacheCfg.Response.SemanticKey
+			}
+		}
 		if autoDeleteCfg != nil {
 			c.AutoDelete.Mode = autoDeleteCfg.Mode
 			c.AutoDelete.Sessions = autoDeleteCfg.Sessions
@@ -87,6 +126,36 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 				c.ThinkingInjection.Prompt = thinkingInjCfg.Prompt
 			}
 		}
+		if safetyCfg != nil {
+			c.Safety = *safetyCfg
+			// Mirror the list fields into the dedicated SQLite stores so
+			// runtime state stays consistent across both sources. Failures
+			// here are logged and do not roll back the config write — the
+			// stores eventually catch up via the legacy fallback path in
+			// requestguard.
+			if h.SafetyWords != nil {
+				if err := h.SafetyWords.ReplaceKind(safetystore.KindContent, safetyCfg.BannedContent); err != nil {
+					mirrorWarn("safety_words.banned_content", err)
+				}
+				if err := h.SafetyWords.ReplaceKind(safetystore.KindRegex, safetyCfg.BannedRegex); err != nil {
+					mirrorWarn("safety_words.banned_regex", err)
+				}
+				if err := h.SafetyWords.ReplaceKind(safetystore.KindJailbreak, safetyCfg.Jailbreak.Patterns); err != nil {
+					mirrorWarn("safety_words.jailbreak", err)
+				}
+			}
+			if h.SafetyIPs != nil {
+				if err := h.SafetyIPs.ReplaceBlockedIPs(safetyCfg.BlockedIPs); err != nil {
+					mirrorWarn("safety_ips.blocked_ips", err)
+				}
+				if err := h.SafetyIPs.ReplaceAllowedIPs(safetyCfg.AllowedIPs); err != nil {
+					mirrorWarn("safety_ips.allowed_ips", err)
+				}
+				if err := h.SafetyIPs.ReplaceBlockedConversationIDs(safetyCfg.BlockedConversationIDs); err != nil {
+					mirrorWarn("safety_ips.blocked_conversation_ids", err)
+				}
+			}
+		}
 		if aliasMap != nil {
 			c.ModelAliases = aliasMap
 		}
@@ -97,6 +166,9 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.applyRuntimeSettings()
+	if cacheCfg != nil {
+		h.applyResponseCacheSettings()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success":    true,
 		"message":    "settings updated and hot reloaded",
@@ -164,4 +236,32 @@ func hasNestedSettingsKey(req map[string]any, section, key string) bool {
 	}
 	_, exists := raw[key]
 	return exists
+}
+
+func hasNestedSettingsPath(req map[string]any, first, second, key string) bool {
+	raw, ok := req[first].(map[string]any)
+	if !ok {
+		return false
+	}
+	nested, ok := raw[second].(map[string]any)
+	if !ok {
+		return false
+	}
+	_, exists := nested[key]
+	return exists
+}
+
+func (h *Handler) applyResponseCacheSettings() {
+	if h == nil || h.Store == nil || h.ResponseCache == nil {
+		return
+	}
+	h.ResponseCache.ApplyOptions(responsecache.Options{
+		Dir:            h.Store.ResponseCacheDir(),
+		MemoryTTL:      h.Store.ResponseCacheMemoryTTL(),
+		DiskTTL:        h.Store.ResponseCacheDiskTTL(),
+		MaxBody:        h.Store.ResponseCacheMaxBodyBytes(),
+		MemoryMaxBytes: h.Store.ResponseCacheMemoryMaxBytes(),
+		DiskMaxBytes:   h.Store.ResponseCacheDiskMaxBytes(),
+		SemanticKey:    h.Store.ResponseCacheSemanticKey(),
+	})
 }

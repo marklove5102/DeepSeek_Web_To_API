@@ -49,31 +49,57 @@ type tokenWindowStats struct {
 }
 
 type overviewCacheStats struct {
-	Lookups                 int64   `json:"lookups"`
-	Hits                    int64   `json:"hits"`
-	Misses                  int64   `json:"misses"`
-	Stores                  int64   `json:"stores"`
-	HitRate                 float64 `json:"hit_rate"`
-	MissRate                float64 `json:"miss_rate"`
-	CacheableLookups        int64   `json:"cacheable_lookups"`
-	CacheableMisses         int64   `json:"cacheable_misses"`
-	CacheableHitRate        float64 `json:"cacheable_hit_rate"`
-	CacheableMissRate       float64 `json:"cacheable_miss_rate"`
-	UncacheableMisses       int64   `json:"uncacheable_misses"`
-	MemoryHits              int64   `json:"memory_hits"`
-	DiskHits                int64   `json:"disk_hits"`
-	UncacheableStatusNon2xx int64   `json:"uncacheable_status_non_2xx"`
-	UncacheableEmptyBody    int64   `json:"uncacheable_empty_body"`
-	UncacheableOversized    int64   `json:"uncacheable_oversized_response"`
-	UncacheableNoStore      int64   `json:"uncacheable_response_no_store"`
-	UncacheableSetCookie    int64   `json:"uncacheable_set_cookie"`
-	MemoryItems             int64   `json:"memory_items"`
-	MemoryBytes             int64   `json:"memory_bytes"`
-	MemoryMaxBytes          int64   `json:"memory_max_bytes"`
-	MemoryTTLSeconds        int64   `json:"memory_ttl_seconds"`
-	DiskMaxBytes            int64   `json:"disk_max_bytes"`
-	DiskTTLSeconds          int64   `json:"disk_ttl_seconds"`
-	Compression             string  `json:"compression,omitempty"`
+	Lookups                 int64                            `json:"lookups"`
+	Hits                    int64                            `json:"hits"`
+	Misses                  int64                            `json:"misses"`
+	Stores                  int64                            `json:"stores"`
+	HitRate                 float64                          `json:"hit_rate"`
+	MissRate                float64                          `json:"miss_rate"`
+	CacheableLookups        int64                            `json:"cacheable_lookups"`
+	CacheableMisses         int64                            `json:"cacheable_misses"`
+	CacheableHitRate        float64                          `json:"cacheable_hit_rate"`
+	CacheableMissRate       float64                          `json:"cacheable_miss_rate"`
+	UncacheableMisses       int64                            `json:"uncacheable_misses"`
+	MemoryHits              int64                            `json:"memory_hits"`
+	DiskHits                int64                            `json:"disk_hits"`
+	UncacheableStatusNon2xx int64                            `json:"uncacheable_status_non_2xx"`
+	UncacheableEmptyBody    int64                            `json:"uncacheable_empty_body"`
+	UncacheableOversized    int64                            `json:"uncacheable_oversized_response"`
+	UncacheableNoStore      int64                            `json:"uncacheable_response_no_store"`
+	UncacheableSetCookie    int64                            `json:"uncacheable_set_cookie"`
+	InflightHits            int64                            `json:"inflight_hits"`
+	InflightPending         int64                            `json:"inflight_pending"`
+	SessionHits             int64                            `json:"session_hits"`
+	ActiveSessions          int64                            `json:"active_sessions"`
+	MemoryItems             int64                            `json:"memory_items"`
+	MemoryBytes             int64                            `json:"memory_bytes"`
+	MemoryMaxBytes          int64                            `json:"memory_max_bytes"`
+	MemoryTTLSeconds        int64                            `json:"memory_ttl_seconds"`
+	DiskMaxBytes            int64                            `json:"disk_max_bytes"`
+	DiskTTLSeconds          int64                            `json:"disk_ttl_seconds"`
+	Compression             string                           `json:"compression,omitempty"`
+	Paths                   map[string]overviewCachePathStat `json:"paths,omitempty"`
+}
+
+// overviewCachePathStat exposes per-path cache lifecycle counters so the
+// admin UI can decompose hit-rate decay by canonical request path. The
+// `shared` flag indicates whether the path crosses caller boundaries
+// (embeddings / count_tokens) or stays partitioned (chat completions /
+// messages / responses).
+type overviewCachePathStat struct {
+	Lookups           int64   `json:"lookups"`
+	Hits              int64   `json:"hits"`
+	Misses            int64   `json:"misses"`
+	Stores            int64   `json:"stores"`
+	MemoryHits        int64   `json:"memory_hits"`
+	DiskHits          int64   `json:"disk_hits"`
+	InflightHits      int64   `json:"inflight_hits"`
+	CacheableLookups  int64   `json:"cacheable_lookups"`
+	CacheableMisses   int64   `json:"cacheable_misses"`
+	UncacheableMisses int64   `json:"uncacheable_misses"`
+	HitRate           float64 `json:"hit_rate"`
+	CacheableHitRate  float64 `json:"cacheable_hit_rate"`
+	Shared            bool    `json:"shared"`
 }
 
 type overviewHistoryStats struct {
@@ -244,6 +270,10 @@ func (h *Handler) cacheStats() overviewCacheStats {
 		UncacheableOversized:    int64Stat(raw, "uncacheable_oversized_response"),
 		UncacheableNoStore:      int64Stat(raw, "uncacheable_response_no_store"),
 		UncacheableSetCookie:    int64Stat(raw, "uncacheable_set_cookie"),
+		InflightHits:            int64Stat(raw, "inflight_hits"),
+		InflightPending:         int64Stat(raw, "inflight_pending"),
+		SessionHits:             int64Stat(raw, "session_hits"),
+		ActiveSessions:          int64Stat(raw, "active_sessions"),
 		MemoryItems:             int64Stat(raw, "memory_items"),
 		MemoryBytes:             int64Stat(raw, "memory_bytes"),
 		MemoryMaxBytes:          int64Stat(raw, "memory_max_bytes"),
@@ -260,7 +290,57 @@ func (h *Handler) cacheStats() overviewCacheStats {
 		stats.CacheableHitRate = round2(float64(hits) * 100 / float64(cacheableLookups))
 		stats.CacheableMissRate = round2(float64(cacheableMisses) * 100 / float64(cacheableLookups))
 	}
+	if rawPaths, ok := raw["paths"].(map[string]any); ok && len(rawPaths) > 0 {
+		stats.Paths = make(map[string]overviewCachePathStat, len(rawPaths))
+		for path, value := range rawPaths {
+			entry, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			pathLookups := int64Stat(entry, "lookups")
+			pathHits := int64Stat(entry, "hits")
+			pathMisses := int64Stat(entry, "misses")
+			pathStores := int64Stat(entry, "stores")
+			pathCacheableLookups := int64Stat(entry, "cacheable_lookups")
+			if pathCacheableLookups <= 0 {
+				pathCacheableLookups = pathHits + pathStores
+			}
+			pathStat := overviewCachePathStat{
+				Lookups:           pathLookups,
+				Hits:              pathHits,
+				Misses:            pathMisses,
+				Stores:            pathStores,
+				MemoryHits:        int64Stat(entry, "memory_hits"),
+				DiskHits:          int64Stat(entry, "disk_hits"),
+				InflightHits:      int64Stat(entry, "inflight_hits"),
+				CacheableLookups:  pathCacheableLookups,
+				CacheableMisses:   int64Stat(entry, "cacheable_misses"),
+				UncacheableMisses: int64Stat(entry, "uncacheable_misses"),
+				Shared:            boolStat(entry, "shared"),
+			}
+			if pathLookups > 0 {
+				pathStat.HitRate = round2(float64(pathHits) * 100 / float64(pathLookups))
+			}
+			if pathCacheableLookups > 0 {
+				pathStat.CacheableHitRate = round2(float64(pathHits) * 100 / float64(pathCacheableLookups))
+			}
+			stats.Paths[path] = pathStat
+		}
+	}
 	return stats
+}
+
+func boolStat(stats map[string]any, key string) bool {
+	if stats == nil {
+		return false
+	}
+	switch v := stats[key].(type) {
+	case bool:
+		return v
+	case string:
+		return v == "true"
+	}
+	return false
 }
 
 func int64Stat(stats map[string]any, key string) int64 {

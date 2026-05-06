@@ -3,6 +3,10 @@ package server
 import (
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -109,5 +113,64 @@ func TestAPIRoutesRemainRegistered(t *testing.T) {
 		if !got[want] {
 			t.Fatalf("expected route %s to be registered", want)
 		}
+	}
+}
+
+func TestAdminBrowserNavigationUsesSPAFallbackBeforeAuth(t *testing.T) {
+	staticDir := t.TempDir()
+	indexPath := filepath.Join(staticDir, "index.html")
+	if err := os.WriteFile(indexPath, []byte(`<!doctype html><title>admin-spa</title>`), 0o600); err != nil {
+		t.Fatalf("write index.html: %v", err)
+	}
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{"keys":["k1"],"accounts":[{"email":"u@example.com","password":"p"}],"server":{"auto_build_webui":false}}`)
+	t.Setenv("DEEPSEEK_WEB_TO_API_ENV_WRITEBACK", "0")
+	t.Setenv("DEEPSEEK_WEB_TO_API_STATIC_ADMIN_DIR", staticDir)
+
+	app, err := NewApp()
+	if err != nil {
+		t.Fatalf("NewApp() error: %v", err)
+	}
+
+	for _, path := range []string{"/admin/accounts", "/admin/proxies", "/admin/settings"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Accept", "text/html,application/xhtml+xml")
+		req.Header.Set("Sec-Fetch-Mode", "navigate")
+		rec := httptest.NewRecorder()
+		app.Router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected %s navigation to return SPA 200, got %d body=%s", path, rec.Code, rec.Body.String())
+		}
+		if got := rec.Body.String(); got != "<!doctype html><title>admin-spa</title>" {
+			t.Fatalf("expected %s navigation to return index.html, got %q", path, got)
+		}
+	}
+}
+
+func TestAdminAPIStillRequiresAuthForJSONRequests(t *testing.T) {
+	staticDir := t.TempDir()
+	indexPath := filepath.Join(staticDir, "index.html")
+	if err := os.WriteFile(indexPath, []byte(`<!doctype html><title>admin-spa</title>`), 0o600); err != nil {
+		t.Fatalf("write index.html: %v", err)
+	}
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{"keys":["k1"],"accounts":[{"email":"u@example.com","password":"p"}],"server":{"auto_build_webui":false}}`)
+	t.Setenv("DEEPSEEK_WEB_TO_API_ENV_WRITEBACK", "0")
+	t.Setenv("DEEPSEEK_WEB_TO_API_STATIC_ADMIN_DIR", staticDir)
+
+	app, err := NewApp()
+	if err != nil {
+		t.Fatalf("NewApp() error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/accounts", nil)
+	req.Header.Set("Accept", "application/json")
+	rec := httptest.NewRecorder()
+	app.Router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected JSON API request to require auth, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Body.String(); !strings.Contains(got, "authentication required") {
+		t.Fatalf("expected auth error body, got %q", got)
 	}
 }

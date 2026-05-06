@@ -212,3 +212,23 @@ func (s *Store) ThinkingInjectionPrompt() string {
 	defer s.mu.RUnlock()
 	return strings.TrimSpace(s.cfg.ThinkingInjection.Prompt)
 }
+
+// RemoteFileUploadEnabled reports whether inline attachments and the
+// current-input-file transcript should be forwarded to the upstream DeepSeek
+// upload_file endpoint. The production default is false because that endpoint
+// is per-account rate-limited and dominated the failure rate on busy
+// workloads. Operators can opt in via the
+// DEEPSEEK_WEB_TO_API_REMOTE_FILE_UPLOAD_ENABLED env var when they have
+// headroom; the JSON config field server.remote_file_upload_enabled is also
+// honoured for parity with other knobs.
+func (s *Store) RemoteFileUploadEnabled() bool {
+	if raw := strings.TrimSpace(os.Getenv("DEEPSEEK_WEB_TO_API_REMOTE_FILE_UPLOAD_ENABLED")); raw != "" {
+		return parseBoolDefault(raw, false)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.cfg.Server.RemoteFileUploadEnabled != nil {
+		return *s.cfg.Server.RemoteFileUploadEnabled
+	}
+	return false
+}

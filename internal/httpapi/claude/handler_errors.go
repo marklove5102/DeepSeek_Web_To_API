@@ -37,6 +37,11 @@ func claudeErrorCode(status int) string {
 		code = "internal_error"
 	case 499:
 		code = "client_cancelled"
+	case 529:
+		// Anthropic-defined "overloaded" status. Claude Code's official
+		// retry/back-off path keys on this code, so we surface it verbatim
+		// instead of falling into the default "invalid_request".
+		code = "overloaded_error"
 	}
 	return code
 }

@@ -66,6 +66,10 @@ Use `.env` only for deployment-layer overrides such as Docker host port, config 
 npm run build --prefix webui
 ```
 
+## License
+
+This project is released under the [MIT License](LICENSE). Anyone may use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the software, subject to inclusion of the copyright and license notice. The software is provided "AS IS", without warranty of any kind.
+
 ## Disclaimer
 
 This project is intended for learning, research, personal experiments, and internal validation. Users are responsible for complying with applicable service terms, platform rules, and laws.

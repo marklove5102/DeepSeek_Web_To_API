@@ -137,8 +137,8 @@ Release 构建会生成 Linux、macOS、Windows 多架构压缩包，构建 GHCR
 触发方式：
 
 ```bash
-git tag v1.0.2
-git push meow v1.0.2
+git tag v1.0.3
+git push meow v1.0.3
 ```
 
 也可以在 GitHub Actions 页面手动运行 `Release Artifacts`。手动运行时填写 `release_tag` 会使用指定 tag；不填写则读取仓库根目录 `VERSION`。

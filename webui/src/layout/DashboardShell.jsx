@@ -37,8 +37,33 @@ const ProxyManagerContainer = lazy(() => import('../features/proxy/ProxyManagerC
 const GITHUB_RELEASE_API = 'https://api.github.com/repos/Meow-Calculations/DeepSeek_Web_To_API/releases/latest'
 const GITHUB_TAGS_API = 'https://api.github.com/repos/Meow-Calculations/DeepSeek_Web_To_API/tags?per_page=1'
 const GITHUB_RELEASES_URL = 'https://github.com/Meow-Calculations/DeepSeek_Web_To_API/releases'
+const ALLOWED_UPDATE_HOST_PREFIXES = [
+    'https://github.com/Meow-Calculations/',
+    'https://github.com/meow-calculations/',
+]
 const VERSION_CHECK_INTERVAL_MS = 30_000
 const VERSION_NOTIFY_STORAGE_KEY = 'deepseek-web-to-api_notified_update_tag'
+
+// safeUpdateURL filters the update-notification href so a compromised /
+// rate-limit-evasion / hostile GitHub API response cannot point the
+// "Update available" link at a `javascript:` URL or a phishing domain.
+// Anything that does not start with the canonical Meow-Calculations
+// release prefix falls back to the static GITHUB_RELEASES_URL.
+const safeUpdateURL = (url) => {
+    if (typeof url !== 'string') {
+        return GITHUB_RELEASES_URL
+    }
+    const trimmed = url.trim()
+    if (!trimmed) {
+        return GITHUB_RELEASES_URL
+    }
+    for (const prefix of ALLOWED_UPDATE_HOST_PREFIXES) {
+        if (trimmed.startsWith(prefix)) {
+            return trimmed
+        }
+    }
+    return GITHUB_RELEASES_URL
+}
 
 const normalizeVersionTag = (value) => String(value || '').trim().replace(/^v/i, '')
 
@@ -319,9 +344,9 @@ export default function DashboardShell({ onLogout, authFetch, config, fetchConfi
                         {availableUpdate && (
                             <a
                                 className="version-update-link mt-3"
-                                href={availableUpdate.url || GITHUB_RELEASES_URL}
+                                href={safeUpdateURL(availableUpdate.url)}
                                 target="_blank"
-                                rel="noreferrer"
+                                rel="noreferrer noopener"
                                 aria-live="polite"
                             >
                                 <span className="version-update-icon">

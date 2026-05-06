@@ -18,6 +18,7 @@ type Config struct {
 	Server            ServerConfig            `json:"server,omitempty"`
 	Storage           StorageConfig           `json:"storage,omitempty"`
 	Cache             CacheConfig             `json:"cache,omitempty"`
+	Safety            SafetyConfig            `json:"safety,omitempty"`
 	Runtime           RuntimeConfig           `json:"runtime,omitempty"`
 	Compat            CompatConfig            `json:"compat,omitempty"`
 	Responses         ResponsesConfig         `json:"responses,omitempty"`
@@ -166,6 +167,7 @@ type ServerConfig struct {
 	StaticAdminDir          string `json:"static_admin_dir,omitempty"`
 	AutoBuildWebUI          *bool  `json:"auto_build_webui,omitempty"`
 	HTTPTotalTimeoutSeconds int    `json:"http_total_timeout_seconds,omitempty"`
+	RemoteFileUploadEnabled *bool  `json:"remote_file_upload_enabled,omitempty"`
 }
 
 type StorageConfig struct {
@@ -173,6 +175,9 @@ type StorageConfig struct {
 	AccountsSQLitePath    string `json:"accounts_sqlite_path,omitempty"`
 	ChatHistoryPath       string `json:"chat_history_path,omitempty"`
 	ChatHistorySQLitePath string `json:"chat_history_sqlite_path,omitempty"`
+	TokenUsageSQLitePath  string `json:"token_usage_sqlite_path,omitempty"`
+	SafetyWordsSQLitePath string `json:"safety_words_sqlite_path,omitempty"`
+	SafetyIPsSQLitePath   string `json:"safety_ips_sqlite_path,omitempty"`
 	RawStreamSampleRoot   string `json:"raw_stream_sample_root,omitempty"`
 }
 
@@ -187,6 +192,35 @@ type ResponseCacheConfig struct {
 	MaxBodyBytes     int64  `json:"max_body_bytes,omitempty"`
 	MemoryMaxBytes   int64  `json:"memory_max_bytes,omitempty"`
 	DiskMaxBytes     int64  `json:"disk_max_bytes,omitempty"`
+	SemanticKey      *bool  `json:"semantic_key,omitempty"`
+}
+
+type SafetyConfig struct {
+	Enabled                *bool               `json:"enabled,omitempty"`
+	BlockMessage           string              `json:"block_message,omitempty"`
+	BlockedIPs             []string            `json:"blocked_ips,omitempty"`
+	AllowedIPs             []string            `json:"allowed_ips,omitempty"`
+	BlockedConversationIDs []string            `json:"blocked_conversation_ids,omitempty"`
+	BannedContent          []string            `json:"banned_content,omitempty"`
+	BannedRegex            []string            `json:"banned_regex,omitempty"`
+	Jailbreak              JailbreakConfig     `json:"jailbreak,omitempty"`
+	AutoBan                SafetyAutoBanConfig `json:"auto_ban,omitempty"`
+}
+
+type JailbreakConfig struct {
+	Enabled  *bool    `json:"enabled,omitempty"`
+	Patterns []string `json:"patterns,omitempty"`
+}
+
+// SafetyAutoBanConfig governs automatic IP blacklisting based on repeated
+// safety / banned-word violations. When violation_count for an IP reaches
+// Threshold within WindowSeconds, the IP is appended to the safety_ips
+// blocked_ips table. Defaults: enabled when safety.enabled, threshold 3,
+// window 600s.
+type SafetyAutoBanConfig struct {
+	Enabled       *bool `json:"enabled,omitempty"`
+	Threshold     int   `json:"threshold,omitempty"`
+	WindowSeconds int   `json:"window_seconds,omitempty"`
 }
 
 type RuntimeConfig struct {

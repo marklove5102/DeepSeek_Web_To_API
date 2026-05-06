@@ -27,6 +27,336 @@ func (s stubResolver) DetermineCaller(_ *http.Request) (*auth.RequestAuth, error
 	return &auth.RequestAuth{CallerID: s.caller}, nil
 }
 
+// TestSessionWideStickyTTLRefreshesSiblingsOnHit pins the session-level
+// stickiness contract: when ANY entry in a logical conversation is hit,
+// every sibling entry of that session also gets its lease refreshed. This
+// is what keeps a multi-turn coding-agent conversation's full prefix hot
+// as long as the conversation is alive — turn 5's hit reaches back and
+// extends the lease on turns 1..4 too. Without this, an early-turn entry
+// stored 25 minutes ago would expire even while the conversation is
+// actively progressing.
+func TestSessionWideStickyTTLRefreshesSiblingsOnHit(t *testing.T) {
+	t.Parallel()
+
+	// 200ms memoryTTL so the test runs fast; 1h diskTTL so the cap is far.
+	cache := New(Options{Dir: t.TempDir(), MemoryTTL: 200 * time.Millisecond, DiskTTL: time.Hour})
+	resolver := stubResolver{caller: "caller-a"}
+
+	// Turn 1: distinct body, but same first user message ("hi") — keeps
+	// the SessionKey stable across turns. Turn 2 appends an assistant +
+	// user message and arrives 130ms later.
+	turn1 := `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}`
+	turn2 := `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"},{"role":"user","content":"continue"}]}`
+
+	var upstream int32
+	handler := cache.Wrap(resolver, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&upstream, 1)
+		w.Header().Set("Content-Type", "application/json")
+		// Echo something distinguishable per body so we can confirm the
+		// right entry is served.
+		body, _ := io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{"echo_len":` + fmt.Sprintf("%d", len(body)) + `}`))
+	}))
+
+	mkReq := func(body string) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer key-a")
+		return req
+	}
+
+	// Prime turn 1.
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, mkReq(turn1))
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("turn1 prime status=%d", rec1.Code)
+	}
+
+	// 130ms later, prime turn 2 (different body, but same session).
+	time.Sleep(130 * time.Millisecond)
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, mkReq(turn2))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("turn2 prime status=%d", rec2.Code)
+	}
+
+	// 130ms later (260ms after turn1 prime; turn1's plain TTL would have
+	// expired at 200ms). Hitting turn2 should refresh turn1's lease via
+	// session linkage.
+	time.Sleep(130 * time.Millisecond)
+	rec3 := httptest.NewRecorder()
+	handler.ServeHTTP(rec3, mkReq(turn2))
+	if got := rec3.Header().Get("X-DeepSeek-Web-To-API-Cache"); got != "memory" {
+		t.Fatalf("turn2 second hit must serve from memory, got %q", got)
+	}
+
+	// Now retry turn 1 (390ms after its original prime — well beyond plain
+	// TTL of 200ms). It must still hit because the previous session-wide
+	// bump extended its lease.
+	rec4 := httptest.NewRecorder()
+	handler.ServeHTTP(rec4, mkReq(turn1))
+	if got := rec4.Header().Get("X-DeepSeek-Web-To-API-Cache"); got != "memory" {
+		t.Fatalf("turn1 retry after session bump must serve from memory, got %q", got)
+	}
+
+	// Two upstream calls (one per prime), zero on hits.
+	if got := atomic.LoadInt32(&upstream); got != 2 {
+		t.Fatalf("expected exactly 2 upstream calls (one per turn prime), got %d", got)
+	}
+
+	stats := cache.Stats()
+	if got, _ := stats["session_hits"].(int64); got < 1 {
+		t.Fatalf("session_hits = %v, want >= 1 (rec3/rec4 should each fire)", stats["session_hits"])
+	}
+	if got, _ := stats["active_sessions"].(int); got != 1 {
+		t.Fatalf("active_sessions = %v, want 1", stats["active_sessions"])
+	}
+}
+
+// TestSlidingWindowKeepsActiveEntryHot pins the session-stickiness contract:
+// every memory hit must extend the entry's lease by memoryTTL (capped by
+// disk expiration). Active conversations that keep hitting the same key
+// stay hot beyond the initial TTL, while inactive entries still age out at
+// the original ceiling.
+func TestSlidingWindowKeepsActiveEntryHot(t *testing.T) {
+	t.Parallel()
+
+	// Memory TTL = 200ms so the test runs fast. Disk TTL = 1h so the
+	// extension cap is far away and never engages.
+	cache := New(Options{Dir: t.TempDir(), MemoryTTL: 200 * time.Millisecond, DiskTTL: time.Hour})
+	var upstream int32
+	handler := cache.Wrap(stubResolver{caller: "caller-a"}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&upstream, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"sticky":true}`))
+	}))
+
+	body := `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}`
+	mkReq := func() *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer key-a")
+		return req
+	}
+
+	// Prime: store one entry.
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, mkReq())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("prime status=%d", rec.Code)
+	}
+
+	// Hit just before the original 200ms TTL would expire (130ms in). The
+	// hit must succeed AND must bump the expiration to now+200ms.
+	time.Sleep(130 * time.Millisecond)
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, mkReq())
+	if got := rec2.Header().Get("X-DeepSeek-Web-To-API-Cache"); got != "memory" {
+		t.Fatalf("expected memory hit at 130ms, got %q", got)
+	}
+
+	// Wait another 130ms (260ms total). Without sliding window, the entry
+	// would have expired at 200ms. With sliding window, the previous hit
+	// at 130ms reset expiration to 330ms, so this request must still hit.
+	time.Sleep(130 * time.Millisecond)
+	rec3 := httptest.NewRecorder()
+	handler.ServeHTTP(rec3, mkReq())
+	if got := rec3.Header().Get("X-DeepSeek-Web-To-API-Cache"); got != "memory" {
+		t.Fatalf("expected sliding-window memory hit at 260ms, got %q", got)
+	}
+
+	// Three requests, one upstream call — the prime.
+	if got := atomic.LoadInt32(&upstream); got != 1 {
+		t.Fatalf("expected exactly one upstream call, got %d", got)
+	}
+}
+
+// TestSingleFlightDedupesConcurrentIdenticalRequests pins the in-flight
+// dedup contract: when N requests with the same cache key arrive while an
+// upstream call is in progress, only one upstream call runs and the
+// remaining N-1 wait on the in-flight slot, then serve from cache. This is
+// what protects upstream from flaky-client retries during streaming.
+func TestSingleFlightDedupesConcurrentIdenticalRequests(t *testing.T) {
+	t.Parallel()
+
+	cache := New(Options{Dir: t.TempDir(), MemoryTTL: time.Minute, DiskTTL: time.Hour})
+	var upstream int32
+	releaseUpstream := make(chan struct{})
+	handler := cache.Wrap(stubResolver{caller: "caller-a"}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&upstream, 1)
+		// Block long enough for waiters to enter the in-flight slot.
+		<-releaseUpstream
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"first":true}`))
+	}))
+
+	body := `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}`
+	mkReq := func() *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer key-a")
+		return req
+	}
+
+	const concurrency = 5
+	results := make(chan *httptest.ResponseRecorder, concurrency)
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, mkReq())
+			results <- rec
+		}()
+	}
+
+	// Give all goroutines time to register: owner runs upstream, others
+	// land in the inflight wait.
+	time.Sleep(50 * time.Millisecond)
+	close(releaseUpstream)
+
+	for i := 0; i < concurrency; i++ {
+		select {
+		case rec := <-results:
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if got := rec.Body.String(); got != `{"first":true}` {
+				t.Fatalf("unexpected body: %s", got)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout waiting for concurrent request to complete")
+		}
+	}
+
+	if got := atomic.LoadInt32(&upstream); got != 1 {
+		t.Fatalf("expected single-flight to dedupe to 1 upstream call, got %d", got)
+	}
+	stats := cache.Stats()
+	inflightHits, _ := stats["inflight_hits"].(int64)
+	if inflightHits < int64(concurrency-1) {
+		t.Fatalf("inflight_hits = %d, want >= %d", inflightHits, concurrency-1)
+	}
+}
+
+// TestEmbeddingsCacheSharesAcrossCallers verifies the policy from
+// docs/cache-research.md §4: embeddings are deterministic functions of input
+// text so cross-caller sharing is safe and prevents redundant upstream
+// calls. Two different API keys posting the same body must hit the same
+// cached response on the second request.
+func TestEmbeddingsCacheSharesAcrossCallers(t *testing.T) {
+	t.Parallel()
+
+	cache := New(Options{Dir: t.TempDir(), MemoryTTL: time.Minute, DiskTTL: time.Hour})
+	var upstream int32
+	makeHandler := func(callerID string) http.Handler {
+		return cache.Wrap(stubResolver{caller: callerID}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			atomic.AddInt32(&upstream, 1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3]}]}`))
+		}))
+	}
+
+	body := `{"model":"text-embedding-3-small","input":"hello world"}`
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(body))
+	req1.Header.Set("Content-Type", "application/json")
+	req1.Header.Set("Authorization", "Bearer key-alice")
+	rec1 := httptest.NewRecorder()
+	makeHandler("caller-alice").ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first status=%d body=%s", rec1.Code, rec1.Body.String())
+	}
+
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(body))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("Authorization", "Bearer key-bob")
+	rec2 := httptest.NewRecorder()
+	makeHandler("caller-bob").ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second status=%d body=%s", rec2.Code, rec2.Body.String())
+	}
+
+	if got := atomic.LoadInt32(&upstream); got != 1 {
+		t.Fatalf("expected upstream called once across two callers, got %d", got)
+	}
+	if got := rec2.Header().Get("X-DeepSeek-Web-To-API-Cache"); got != "memory" {
+		t.Fatalf("expected cross-caller memory hit, got %q", got)
+	}
+	stats := cache.Stats()
+	paths, ok := stats["paths"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected paths breakdown, got %T", stats["paths"])
+	}
+	emb, ok := paths["/v1/embeddings"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected /v1/embeddings entry, paths=%v", paths)
+	}
+	if got := emb["hits"]; got != int64(1) {
+		t.Fatalf("/v1/embeddings hits = %v, want 1", got)
+	}
+	if got := emb["stores"]; got != int64(1) {
+		t.Fatalf("/v1/embeddings stores = %v, want 1", got)
+	}
+	if got := emb["shared"]; got != true {
+		t.Fatalf("/v1/embeddings shared flag = %v, want true", got)
+	}
+}
+
+// TestChatCompletionsCacheStaysPerCaller verifies the inverse policy:
+// LLM completions are sampling-based and a hit returns a previously sampled
+// response. Crossing the caller boundary would expose one tenant's reply to
+// another, so the cache must remain partitioned. Same body, different
+// CallerID → independent cache entries.
+func TestChatCompletionsCacheStaysPerCaller(t *testing.T) {
+	t.Parallel()
+
+	cache := New(Options{Dir: t.TempDir(), MemoryTTL: time.Minute, DiskTTL: time.Hour})
+	var upstream int32
+	makeHandler := func(callerID string) http.Handler {
+		return cache.Wrap(stubResolver{caller: callerID}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			atomic.AddInt32(&upstream, 1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"hi"}}]}`))
+		}))
+	}
+
+	body := `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}`
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req1.Header.Set("Content-Type", "application/json")
+	req1.Header.Set("Authorization", "Bearer key-alice")
+	rec1 := httptest.NewRecorder()
+	makeHandler("caller-alice").ServeHTTP(rec1, req1)
+
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("Authorization", "Bearer key-bob")
+	rec2 := httptest.NewRecorder()
+	makeHandler("caller-bob").ServeHTTP(rec2, req2)
+
+	if got := atomic.LoadInt32(&upstream); got != 2 {
+		t.Fatalf("expected upstream called twice (one per caller), got %d", got)
+	}
+	if got := rec2.Header().Get("X-DeepSeek-Web-To-API-Cache"); got != "" {
+		t.Fatalf("expected no cross-caller hit on chat completions, got source=%q", got)
+	}
+	stats := cache.Stats()
+	paths, ok := stats["paths"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected paths breakdown, got %T", stats["paths"])
+	}
+	chat, ok := paths["/v1/chat/completions"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected /v1/chat/completions entry, paths=%v", paths)
+	}
+	if got := chat["hits"]; got != int64(0) {
+		t.Fatalf("/v1/chat/completions hits = %v, want 0 (per-caller boundary)", got)
+	}
+	if got := chat["stores"]; got != int64(2) {
+		t.Fatalf("/v1/chat/completions stores = %v, want 2", got)
+	}
+	if got := chat["shared"]; got != false {
+		t.Fatalf("/v1/chat/completions shared flag = %v, want false", got)
+	}
+}
+
 func TestMiddlewareCachesProtocolResponseInMemory(t *testing.T) {
 	t.Parallel()
 
@@ -368,6 +698,31 @@ func TestRequestKeyPreservesSemanticJSONNull(t *testing.T) {
 	}
 }
 
+func TestRequestKeySemanticModeIgnoresTransientToolIDsAndWhitespace(t *testing.T) {
+	t.Parallel()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Content-Type", "application/json")
+	bodyA := []byte(`{
+		"model":"m",
+		"messages":[
+			{"role":"assistant","tool_calls":[{"id":"call_a","type":"function","function":{"name":"read_file","arguments":{"path":"README.md"}}}]},
+			{"role":"tool","tool_call_id":"call_a","content":"line one\nline two"}
+		]
+	}`)
+	bodyB := []byte(`{
+		"model":"m",
+		"messages":[
+			{"role":"assistant","tool_calls":[{"id":"call_b","type":"function","function":{"name":"read_file","arguments":{"path":"README.md"}}}]},
+			{"role":"tool","tool_call_id":"call_b","content":" line one   line two "}
+		]
+	}`)
+
+	if RequestKey(req, "caller-a", bodyA) != RequestKey(req, "caller-a", bodyB) {
+		t.Fatal("expected semantic cache key to ignore transient tool ids and whitespace")
+	}
+}
+
 func TestRequestKeyIgnoresClaudeTransportCacheFields(t *testing.T) {
 	t.Parallel()
 
@@ -481,8 +836,58 @@ func TestStatsReportsCompressionAndTTLs(t *testing.T) {
 	if got := stats["disk_max_bytes"]; got != int64(5678) {
 		t.Fatalf("disk_max_bytes=%v", got)
 	}
+	if got := stats["max_body_bytes"]; got != int64(defaultMaxBody) {
+		t.Fatalf("max_body_bytes=%v", got)
+	}
 	if got := stats["compression"]; got != "gzip" {
 		t.Fatalf("compression=%v", got)
+	}
+}
+
+func TestApplyOptionsHotReloadsCacheSettings(t *testing.T) {
+	t.Parallel()
+
+	cache := New(Options{Dir: t.TempDir(), MemoryTTL: time.Hour, DiskTTL: time.Hour, MemoryMaxBytes: 1024, DiskMaxBytes: 1024, SemanticKey: true})
+	cache.Set(strings.Repeat("f", 64), Entry{Status: http.StatusOK, Body: []byte(`{"cached":true}`)})
+	if stats := cache.Stats(); stats["memory_items"] != 1 {
+		t.Fatalf("expected warm cache before hot reload, got %v", stats["memory_items"])
+	}
+
+	newDir := t.TempDir()
+	cache.ApplyOptions(Options{
+		Dir:            newDir,
+		MemoryTTL:      time.Minute,
+		DiskTTL:        2 * time.Hour,
+		MaxBody:        2048,
+		MemoryMaxBytes: 512,
+		DiskMaxBytes:   4096,
+		SemanticKey:    false,
+	})
+
+	stats := cache.Stats()
+	if got := stats["disk_dir"]; got != newDir {
+		t.Fatalf("disk_dir=%v", got)
+	}
+	if got := stats["memory_ttl_seconds"]; got != 60 {
+		t.Fatalf("memory_ttl_seconds=%v", got)
+	}
+	if got := stats["disk_ttl_seconds"]; got != 7200 {
+		t.Fatalf("disk_ttl_seconds=%v", got)
+	}
+	if got := stats["max_body_bytes"]; got != int64(2048) {
+		t.Fatalf("max_body_bytes=%v", got)
+	}
+	if got := stats["memory_max_bytes"]; got != int64(512) {
+		t.Fatalf("memory_max_bytes=%v", got)
+	}
+	if got := stats["disk_max_bytes"]; got != int64(4096) {
+		t.Fatalf("disk_max_bytes=%v", got)
+	}
+	if got := stats["semantic_key"]; got != false {
+		t.Fatalf("semantic_key=%v", got)
+	}
+	if got := stats["memory_items"]; got != 0 {
+		t.Fatalf("expected memory cache to be reset after hot reload, got %v", got)
 	}
 }
 

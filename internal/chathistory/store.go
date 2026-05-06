@@ -45,6 +45,8 @@ type Entry struct {
 	Status           string         `json:"status"`
 	CallerID         string         `json:"caller_id,omitempty"`
 	AccountID        string         `json:"account_id,omitempty"`
+	RequestIP        string         `json:"request_ip,omitempty"`
+	ConversationID   string         `json:"conversation_id,omitempty"`
 	Model            string         `json:"model,omitempty"`
 	Stream           bool           `json:"stream"`
 	UserInput        string         `json:"user_input,omitempty"`
@@ -74,6 +76,8 @@ type SummaryEntry struct {
 	Status         string         `json:"status"`
 	CallerID       string         `json:"caller_id,omitempty"`
 	AccountID      string         `json:"account_id,omitempty"`
+	RequestIP      string         `json:"request_ip,omitempty"`
+	ConversationID string         `json:"conversation_id,omitempty"`
 	Model          string         `json:"model,omitempty"`
 	Stream         bool           `json:"stream"`
 	UserInput      string         `json:"user_input,omitempty"`
@@ -93,15 +97,17 @@ type File struct {
 }
 
 type StartParams struct {
-	CallerID    string
-	AccountID   string
-	Status      string
-	Model       string
-	Stream      bool
-	UserInput   string
-	Messages    []Message
-	HistoryText string
-	FinalPrompt string
+	CallerID       string
+	AccountID      string
+	RequestIP      string
+	ConversationID string
+	Status         string
+	Model          string
+	Stream         bool
+	UserInput      string
+	Messages       []Message
+	HistoryText    string
+	FinalPrompt    string
 }
 
 type UpdateParams struct {
@@ -167,8 +173,16 @@ func New(path string) *Store {
 }
 
 func NewSQLite(path, legacyPath string) *Store {
+	return NewSQLiteWithTokenStats(path, legacyPath, "")
+}
+
+// NewSQLiteWithTokenStats opens chat history as SQLite and additionally wires
+// up a dedicated token-usage SQLite at tokenStatsPath. When tokenStatsPath is
+// empty the store falls back to the legacy chat_history_meta rollup keys.
+func NewSQLiteWithTokenStats(path, legacyPath, tokenStatsPath string) *Store {
 	path = strings.TrimSpace(path)
 	legacyPath = strings.TrimSpace(legacyPath)
+	tokenStatsPath = strings.TrimSpace(tokenStatsPath)
 	s := &Store{
 		path:      path,
 		detailDir: legacyPath + ".d",
@@ -182,7 +196,7 @@ func NewSQLite(path, legacyPath string) *Store {
 		dirty:   map[string]struct{}{},
 		deleted: map[string]struct{}{},
 	}
-	sqliteStore, err := newSQLiteStore(path, legacyPath)
+	sqliteStore, err := newSQLiteStore(path, legacyPath, tokenStatsPath)
 	if err != nil {
 		s.err = err
 		return s
@@ -370,19 +384,21 @@ func (s *Store) Start(params StartParams) (Entry, error) {
 		status = "streaming"
 	}
 	entry := Entry{
-		ID:          "chat_" + strings.ReplaceAll(uuid.NewString(), "-", ""),
-		Revision:    revision,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-		Status:      status,
-		CallerID:    strings.TrimSpace(params.CallerID),
-		AccountID:   strings.TrimSpace(params.AccountID),
-		Model:       strings.TrimSpace(params.Model),
-		Stream:      params.Stream,
-		UserInput:   strings.TrimSpace(params.UserInput),
-		Messages:    cloneMessages(params.Messages),
-		HistoryText: params.HistoryText,
-		FinalPrompt: strings.TrimSpace(params.FinalPrompt),
+		ID:             "chat_" + strings.ReplaceAll(uuid.NewString(), "-", ""),
+		Revision:       revision,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		Status:         status,
+		CallerID:       strings.TrimSpace(params.CallerID),
+		AccountID:      strings.TrimSpace(params.AccountID),
+		RequestIP:      strings.TrimSpace(params.RequestIP),
+		ConversationID: strings.TrimSpace(params.ConversationID),
+		Model:          strings.TrimSpace(params.Model),
+		Stream:         params.Stream,
+		UserInput:      strings.TrimSpace(params.UserInput),
+		Messages:       cloneMessages(params.Messages),
+		HistoryText:    params.HistoryText,
+		FinalPrompt:    strings.TrimSpace(params.FinalPrompt),
 	}
 	s.details[entry.ID] = entry
 	s.markDetailDirtyLocked(entry.ID)
@@ -744,6 +760,8 @@ func summaryFromEntry(item Entry) SummaryEntry {
 		Status:         item.Status,
 		CallerID:       item.CallerID,
 		AccountID:      item.AccountID,
+		RequestIP:      item.RequestIP,
+		ConversationID: item.ConversationID,
 		Model:          item.Model,
 		Stream:         item.Stream,
 		UserInput:      item.UserInput,

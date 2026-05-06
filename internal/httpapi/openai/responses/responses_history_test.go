@@ -33,6 +33,7 @@ func (responsesHistoryConfigStub) CurrentInputFileEnabled() bool       { return 
 func (responsesHistoryConfigStub) CurrentInputFileMinChars() int       { return 0 }
 func (responsesHistoryConfigStub) ThinkingInjectionEnabled() bool      { return false }
 func (responsesHistoryConfigStub) ThinkingInjectionPrompt() string     { return "" }
+func (responsesHistoryConfigStub) RemoteFileUploadEnabled() bool       { return true }
 
 type responsesHistoryCurrentInputConfigStub struct {
 	responsesHistoryConfigStub

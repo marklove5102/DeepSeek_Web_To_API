@@ -43,6 +43,9 @@ func (c Config) MarshalJSON() ([]byte, error) {
 	if responseCacheConfigured(c.Cache.Response) {
 		m["cache"] = c.Cache
 	}
+	if safetyConfigured(c.Safety) {
+		m["safety"] = c.Safety
+	}
 	if c.Runtime.AccountMaxInflight > 0 || c.Runtime.AccountMaxQueue > 0 || c.Runtime.GlobalMaxInflight > 0 || c.Runtime.TokenRefreshIntervalHours > 0 {
 		m["runtime"] = c.Runtime
 	}
@@ -115,6 +118,10 @@ func (c *Config) UnmarshalJSON(b []byte) error {
 			if err := json.Unmarshal(v, &c.Cache); err != nil {
 				return fmt.Errorf("invalid field %q: %w", k, err)
 			}
+		case "safety":
+			if err := json.Unmarshal(v, &c.Safety); err != nil {
+				return fmt.Errorf("invalid field %q: %w", k, err)
+			}
 		case "runtime":
 			if err := json.Unmarshal(v, &c.Runtime); err != nil {
 				return fmt.Errorf("invalid field %q: %w", k, err)
@@ -177,7 +184,35 @@ func (c Config) Clone() Config {
 			HTTPTotalTimeoutSeconds: c.Server.HTTPTotalTimeoutSeconds,
 		},
 		Storage: c.Storage,
-		Cache:   c.Cache,
+		Cache: CacheConfig{
+			Response: ResponseCacheConfig{
+				Dir:              c.Cache.Response.Dir,
+				MemoryTTLSeconds: c.Cache.Response.MemoryTTLSeconds,
+				DiskTTLSeconds:   c.Cache.Response.DiskTTLSeconds,
+				MaxBodyBytes:     c.Cache.Response.MaxBodyBytes,
+				MemoryMaxBytes:   c.Cache.Response.MemoryMaxBytes,
+				DiskMaxBytes:     c.Cache.Response.DiskMaxBytes,
+				SemanticKey:      cloneBoolPtr(c.Cache.Response.SemanticKey),
+			},
+		},
+		Safety: SafetyConfig{
+			Enabled:                cloneBoolPtr(c.Safety.Enabled),
+			BlockMessage:           c.Safety.BlockMessage,
+			BlockedIPs:             slices.Clone(c.Safety.BlockedIPs),
+			AllowedIPs:             slices.Clone(c.Safety.AllowedIPs),
+			BlockedConversationIDs: slices.Clone(c.Safety.BlockedConversationIDs),
+			BannedContent:          slices.Clone(c.Safety.BannedContent),
+			BannedRegex:            slices.Clone(c.Safety.BannedRegex),
+			Jailbreak: JailbreakConfig{
+				Enabled:  cloneBoolPtr(c.Safety.Jailbreak.Enabled),
+				Patterns: slices.Clone(c.Safety.Jailbreak.Patterns),
+			},
+			AutoBan: SafetyAutoBanConfig{
+				Enabled:       cloneBoolPtr(c.Safety.AutoBan.Enabled),
+				Threshold:     c.Safety.AutoBan.Threshold,
+				WindowSeconds: c.Safety.AutoBan.WindowSeconds,
+			},
+		},
 		Runtime: c.Runtime,
 		Compat: CompatConfig{
 			WideInputStrictOutput: cloneBoolPtr(c.Compat.WideInputStrictOutput),

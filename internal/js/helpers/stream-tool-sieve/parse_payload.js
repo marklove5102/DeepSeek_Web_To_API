@@ -1,6 +1,12 @@
 'use strict';
 
 const CDATA_PATTERN = /^<!\[CDATA\[([\s\S]*?)]]>$/i;
+// CDATA_PIPE_VARIANT_PATTERN matches a near-miss CDATA emitted by DeepSeek
+// when the model bleeds the surrounding "<|DSML|...|>" pipe convention into
+// the CDATA opener, producing "<![CDATA|VALUE]]>" or "<![CDATA|VALUE|]]>".
+const CDATA_PIPE_VARIANT_PATTERN = /^<!\[CDATA[\|｜]([\s\S]*?)[\|｜]?]]>$/i;
+const CDATA_PIPE_OPEN_ASCII = '<![cdata|';
+const CDATA_PIPE_OPEN_WIDE = '<![cdata｜';
 const XML_ATTR_PATTERN = /\b([a-z0-9_:-]+)\s*=\s*("([^"]*)"|'([^']*)')/gi;
 const TOOL_MARKUP_NAMES = ['tool_calls', 'invoke', 'parameter'];
 const TOOL_MARKUP_TOKEN_ARTIFACTS = ['\u200b', '\u200c', '\u200d', '\u2060', '\ufeff', '\u2581'];
@@ -1019,8 +1025,19 @@ function extractStandaloneCDATA(inner) {
   if (cdataMatch && cdataMatch[1] !== undefined) {
     return { ok: true, value: cdataMatch[1] };
   }
-  if (s.toLowerCase().startsWith('<![cdata[')) {
+  const variantMatch = s.match(CDATA_PIPE_VARIANT_PATTERN);
+  if (variantMatch && variantMatch[1] !== undefined) {
+    return { ok: true, value: variantMatch[1] };
+  }
+  const lower = s.toLowerCase();
+  if (lower.startsWith('<![cdata[')) {
     return { ok: true, value: s.slice('<![CDATA['.length) };
+  }
+  if (lower.startsWith(CDATA_PIPE_OPEN_ASCII)) {
+    return { ok: true, value: s.slice(CDATA_PIPE_OPEN_ASCII.length) };
+  }
+  if (lower.startsWith(CDATA_PIPE_OPEN_WIDE)) {
+    return { ok: true, value: s.slice(CDATA_PIPE_OPEN_WIDE.length) };
   }
   return { ok: false, value: '' };
 }

@@ -3,11 +3,13 @@ package shared
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"DeepSeek_Web_To_API/internal/account"
 	"DeepSeek_Web_To_API/internal/auth"
 	"DeepSeek_Web_To_API/internal/config"
 	dsclient "DeepSeek_Web_To_API/internal/deepseek/client"
+	"DeepSeek_Web_To_API/internal/responsecache"
 )
 
 type ConfigStore interface {
@@ -43,6 +45,16 @@ type ConfigStore interface {
 	ThinkingInjectionEnabled() bool
 	ThinkingInjectionPrompt() string
 	CompatStripReferenceMarkers() bool
+	CompatWideInputStrictOutput() bool
+	ResponsesStoreTTLSeconds() int
+	EmbeddingsProvider() string
+	ResponseCacheDir() string
+	ResponseCacheMemoryTTL() time.Duration
+	ResponseCacheMemoryMaxBytes() int64
+	ResponseCacheDiskTTL() time.Duration
+	ResponseCacheDiskMaxBytes() int64
+	ResponseCacheMaxBodyBytes() int64
+	ResponseCacheSemanticKey() bool
 	AutoDeleteSessions() bool
 	RawStreamSampleRoot() string
 }
@@ -55,6 +67,11 @@ type PoolController interface {
 
 type ResponseCacheStatsProvider interface {
 	Stats() map[string]any
+}
+
+type ResponseCacheRuntimeProvider interface {
+	ResponseCacheStatsProvider
+	ApplyOptions(opts responsecache.Options)
 }
 
 type OpenAIChatCaller interface {
@@ -73,3 +90,4 @@ type DeepSeekCaller interface {
 var _ ConfigStore = (*config.Store)(nil)
 var _ PoolController = (*account.Pool)(nil)
 var _ DeepSeekCaller = (*dsclient.Client)(nil)
+var _ ResponseCacheRuntimeProvider = (*responsecache.Cache)(nil)

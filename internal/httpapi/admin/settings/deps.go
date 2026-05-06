@@ -4,14 +4,18 @@ import (
 	"DeepSeek_Web_To_API/internal/chathistory"
 	"DeepSeek_Web_To_API/internal/config"
 	adminshared "DeepSeek_Web_To_API/internal/httpapi/admin/shared"
+	"DeepSeek_Web_To_API/internal/safetystore"
 )
 
 type Handler struct {
-	Store       adminshared.ConfigStore
-	Pool        adminshared.PoolController
-	DS          adminshared.DeepSeekCaller
-	OpenAI      adminshared.OpenAIChatCaller
-	ChatHistory *chathistory.Store
+	Store         adminshared.ConfigStore
+	Pool          adminshared.PoolController
+	DS            adminshared.DeepSeekCaller
+	OpenAI        adminshared.OpenAIChatCaller
+	ChatHistory   *chathistory.Store
+	ResponseCache adminshared.ResponseCacheRuntimeProvider
+	SafetyWords   *safetystore.WordsStore
+	SafetyIPs     *safetystore.IPsStore
 }
 
 var writeJSON = adminshared.WriteJSON

@@ -11,12 +11,35 @@ import {
 const DEFAULT_FORM = {
     admin: { jwt_expire_hours: 24 },
     runtime: { account_max_inflight: 2, account_max_queue: 10, global_max_inflight: 10, token_refresh_interval_hours: 6 },
-    compat: { strip_reference_markers: true },
+    compat: { wide_input_strict_output: true, strip_reference_markers: true },
     responses: { store_ttl_seconds: 900 },
     embeddings: { provider: '' },
+    cache: {
+        response: {
+            dir: '',
+            memory_ttl_seconds: 300,
+            memory_max_bytes: 3800000000,
+            disk_ttl_seconds: 14400,
+            disk_max_bytes: 16000000000,
+            max_body_bytes: 67108864,
+            semantic_key: true,
+            compression: 'gzip',
+        },
+    },
     auto_delete: { mode: 'none' },
     current_input_file: { enabled: true, min_chars: 0 },
     thinking_injection: { enabled: true, prompt: '', default_prompt: '' },
+    safety: {
+        enabled: false,
+        block_message: '',
+        blocked_ips_text: '',
+        allowed_ips_text: '',
+        blocked_conversation_ids_text: '',
+        banned_content_text: '',
+        banned_regex_text: '',
+        jailbreak: { enabled: false, patterns_text: '' },
+        auto_ban: { enabled: true, threshold: 3, window_seconds: 600 },
+    },
     model_aliases_text: '{}',
 }
 
@@ -48,6 +71,51 @@ function normalizeAutoDeleteMode(raw) {
     return 'none'
 }
 
+function listToText(items) {
+    if (!Array.isArray(items)) {
+        return ''
+    }
+    return items.filter((item) => String(item || '').trim()).join('\n')
+}
+
+// textToList parses a multi-line / comma-separated textarea value into a
+// clean list of trimmed entries. Each entry is sanitized to remove
+// control characters (\x00-\x1F minus tab, \x7F) before being sent to
+// the Go backend; without this an admin could paste a payload that
+// includes embedded NULs or newlines that would later parse as separate
+// list items in regex / IP / banned-content lists.
+function textToList(raw) {
+    return String(raw || '')
+        .split(/\r?\n|,/)
+        .map((item) => sanitizeListItem(item))
+        .filter(Boolean)
+}
+
+function sanitizeListItem(value) {
+    return String(value || '')
+        // strip control chars (keep \t and \n already handled by split)
+        .replace(/[\u0000-\u001f\u007f]/g, '')
+        .trim()
+}
+
+// safeNumber maps any user-entered value to a finite number with explicit
+// fallback. Number(e.target.value) on an empty input yields 0, on a non
+// numeric string yields NaN — neither should reach the Go backend without
+// a deliberate decision. min/max default to no-clamping.
+function safeNumber(raw, fallback, min, max) {
+    const n = Number(raw)
+    if (!Number.isFinite(n)) {
+        return fallback
+    }
+    if (typeof min === 'number' && n < min) {
+        return min
+    }
+    if (typeof max === 'number' && n > max) {
+        return max
+    }
+    return n
+}
+
 function fromServerForm(data) {
     const currentInputFileEnabled = data.current_input_file?.enabled ?? true
     return {
@@ -59,6 +127,7 @@ function fromServerForm(data) {
             token_refresh_interval_hours: Number(data.runtime?.token_refresh_interval_hours || 6),
         },
         compat: {
+            wide_input_strict_output: data.compat?.wide_input_strict_output ?? true,
             strip_reference_markers: data.compat?.strip_reference_markers ?? true,
         },
         responses: {
@@ -66,6 +135,18 @@ function fromServerForm(data) {
         },
         embeddings: {
             provider: data.embeddings?.provider || '',
+        },
+        cache: {
+            response: {
+                dir: data.cache?.response?.dir || '',
+                memory_ttl_seconds: Number(data.cache?.response?.memory_ttl_seconds || 300),
+                memory_max_bytes: Number(data.cache?.response?.memory_max_bytes || 3800000000),
+                disk_ttl_seconds: Number(data.cache?.response?.disk_ttl_seconds || 14400),
+                disk_max_bytes: Number(data.cache?.response?.disk_max_bytes || 16000000000),
+                max_body_bytes: Number(data.cache?.response?.max_body_bytes || 67108864),
+                semantic_key: data.cache?.response?.semantic_key ?? true,
+                compression: data.cache?.response?.compression || 'gzip',
+            },
         },
         auto_delete: {
             mode: normalizeAutoDeleteMode(data.auto_delete),
@@ -78,6 +159,24 @@ function fromServerForm(data) {
             enabled: data.thinking_injection?.enabled ?? true,
             prompt: data.thinking_injection?.prompt || '',
             default_prompt: data.thinking_injection?.default_prompt || '',
+        },
+        safety: {
+            enabled: Boolean(data.safety?.enabled),
+            block_message: data.safety?.block_message || '',
+            blocked_ips_text: listToText(data.safety?.blocked_ips),
+            allowed_ips_text: listToText(data.safety?.allowed_ips),
+            blocked_conversation_ids_text: listToText(data.safety?.blocked_conversation_ids),
+            banned_content_text: listToText(data.safety?.banned_content),
+            banned_regex_text: listToText(data.safety?.banned_regex),
+            jailbreak: {
+                enabled: Boolean(data.safety?.jailbreak?.enabled),
+                patterns_text: listToText(data.safety?.jailbreak?.patterns),
+            },
+            auto_ban: {
+                enabled: data.safety?.auto_ban?.enabled ?? true,
+                threshold: safeNumber(data.safety?.auto_ban?.threshold, 3, 1, 1_000_000),
+                window_seconds: safeNumber(data.safety?.auto_ban?.window_seconds, 600, 1, 30 * 24 * 60 * 60),
+            },
         },
         model_aliases_text: JSON.stringify(data.model_aliases || {}, null, 2),
     }
@@ -94,10 +193,21 @@ function toServerPayload(form) {
             token_refresh_interval_hours: Number(form.runtime.token_refresh_interval_hours),
         },
         compat: {
+            wide_input_strict_output: Boolean(form.compat?.wide_input_strict_output ?? true),
             strip_reference_markers: Boolean(form.compat?.strip_reference_markers ?? true),
         },
         responses: { store_ttl_seconds: Number(form.responses.store_ttl_seconds) },
         embeddings: { provider: String(form.embeddings.provider || '').trim() },
+        cache: {
+            response: {
+                memory_ttl_seconds: Number(form.cache?.response?.memory_ttl_seconds || 300),
+                memory_max_bytes: Number(form.cache?.response?.memory_max_bytes || 3800000000),
+                disk_ttl_seconds: Number(form.cache?.response?.disk_ttl_seconds || 14400),
+                disk_max_bytes: Number(form.cache?.response?.disk_max_bytes || 16000000000),
+                max_body_bytes: Number(form.cache?.response?.max_body_bytes || 67108864),
+                semantic_key: Boolean(form.cache?.response?.semantic_key ?? true),
+            },
+        },
         auto_delete: { mode: normalizeAutoDeleteMode(form.auto_delete) },
         current_input_file: {
             enabled: currentInputFileEnabled,
@@ -106,6 +216,24 @@ function toServerPayload(form) {
         thinking_injection: {
             enabled: Boolean(form.thinking_injection?.enabled ?? true),
             prompt: String(form.thinking_injection?.prompt || '').trim(),
+        },
+        safety: {
+            enabled: Boolean(form.safety?.enabled),
+            block_message: String(form.safety?.block_message || '').trim(),
+            blocked_ips: textToList(form.safety?.blocked_ips_text),
+            allowed_ips: textToList(form.safety?.allowed_ips_text),
+            blocked_conversation_ids: textToList(form.safety?.blocked_conversation_ids_text),
+            banned_content: textToList(form.safety?.banned_content_text),
+            banned_regex: textToList(form.safety?.banned_regex_text),
+            jailbreak: {
+                enabled: Boolean(form.safety?.jailbreak?.enabled),
+                patterns: textToList(form.safety?.jailbreak?.patterns_text),
+            },
+            auto_ban: {
+                enabled: Boolean(form.safety?.auto_ban?.enabled ?? true),
+                threshold: safeNumber(form.safety?.auto_ban?.threshold, 3, 1, 1_000_000),
+                window_seconds: safeNumber(form.safety?.auto_ban?.window_seconds, 600, 1, 30 * 24 * 60 * 60),
+            },
         },
     }
 }

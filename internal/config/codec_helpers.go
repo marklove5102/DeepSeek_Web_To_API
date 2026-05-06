@@ -14,7 +14,23 @@ func responseCacheConfigured(c ResponseCacheConfig) bool {
 		c.DiskTTLSeconds > 0 ||
 		c.MaxBodyBytes > 0 ||
 		c.MemoryMaxBytes > 0 ||
-		c.DiskMaxBytes > 0
+		c.DiskMaxBytes > 0 ||
+		c.SemanticKey != nil
+}
+
+func safetyConfigured(c SafetyConfig) bool {
+	return c.Enabled != nil ||
+		strings.TrimSpace(c.BlockMessage) != "" ||
+		len(c.BlockedIPs) > 0 ||
+		len(c.AllowedIPs) > 0 ||
+		len(c.BlockedConversationIDs) > 0 ||
+		len(c.BannedContent) > 0 ||
+		len(c.BannedRegex) > 0 ||
+		c.Jailbreak.Enabled != nil ||
+		len(c.Jailbreak.Patterns) > 0 ||
+		c.AutoBan.Enabled != nil ||
+		c.AutoBan.Threshold > 0 ||
+		c.AutoBan.WindowSeconds > 0
 }
 
 func cloneStringMap(in map[string]string) map[string]string {

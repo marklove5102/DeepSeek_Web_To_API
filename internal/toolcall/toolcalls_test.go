@@ -91,6 +91,49 @@ func TestParseToolCallsRecoversFromMalformedCDATAClose(t *testing.T) {
 	}
 }
 
+// TestParseToolCallsToleratesCDATAPipeOpenerVariant covers a real-world
+// DeepSeek emission where the model bleeds the surrounding "<|DSML|...|>"
+// pipe convention into the CDATA opener, producing "<![CDATA|VALUE]]>"
+// instead of the canonical "<![CDATA[VALUE]]>". Without tolerance the
+// wrapper survives in the parameter value, and downstream Claude Code
+// renders the agent_type as "<![CDATA|general-purpose]]>" instead of
+// "general-purpose" in its progress UI.
+func TestParseToolCallsToleratesCDATAPipeOpenerVariant(t *testing.T) {
+	cases := []struct {
+		name     string
+		raw      string
+		expected string
+	}{
+		{
+			name:     "ascii pipe opener only",
+			raw:      `<|DSML|tool_calls><|DSML|invoke name="Agent"><|DSML|parameter name="subagent_type"><![CDATA|general-purpose]]></|DSML|parameter></|DSML|invoke></|DSML|tool_calls>`,
+			expected: "general-purpose",
+		},
+		{
+			name:     "ascii pipes both ends",
+			raw:      `<|DSML|tool_calls><|DSML|invoke name="Agent"><|DSML|parameter name="subagent_type"><![CDATA|general-purpose|]]></|DSML|parameter></|DSML|invoke></|DSML|tool_calls>`,
+			expected: "general-purpose",
+		},
+		{
+			name:     "fullwidth pipe opener",
+			raw:      `<|DSML|tool_calls><|DSML|invoke name="Agent"><|DSML|parameter name="subagent_type"><![CDATA｜general-purpose]]></|DSML|parameter></|DSML|invoke></|DSML|tool_calls>`,
+			expected: "general-purpose",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := ParseToolCalls(tc.raw, []string{"Agent"})
+			if len(calls) != 1 {
+				t.Fatalf("expected 1 call, got %#v", calls)
+			}
+			got, _ := calls[0].Input["subagent_type"].(string)
+			if got != tc.expected {
+				t.Fatalf("subagent_type leaked CDATA wrapper: got %q want %q", got, tc.expected)
+			}
+		})
+	}
+}
+
 // TestParseToolCallsSupportsTrailingPipeBeforeClose covers wrappers that close
 // with "|>" instead of plain ">", e.g. "<|DSML|tool_calls|>".
 func TestParseToolCallsSupportsTrailingPipeBeforeClose(t *testing.T) {

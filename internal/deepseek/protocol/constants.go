@@ -161,9 +161,17 @@ func toStringSet(in []string) map[string]struct{} {
 }
 
 var (
-	KeepAliveTimeout  = envInt("DEEPSEEK_WEB_TO_API_STREAM_KEEPALIVE_INTERVAL_SECONDS", 5)
-	StreamIdleTimeout = envInt("DEEPSEEK_WEB_TO_API_STREAM_IDLE_TIMEOUT_SECONDS", 1800)
-	MaxKeepaliveCount = envInt("DEEPSEEK_WEB_TO_API_STREAM_MAX_KEEPALIVE_NO_CONTENT", 360)
+	KeepAliveTimeout = envInt("DEEPSEEK_WEB_TO_API_STREAM_KEEPALIVE_INTERVAL_SECONDS", 5)
+	// StreamIdleTimeout is the SSE-stream "no content received" cutoff,
+	// matched against the global HTTP total timeout (7200s default since
+	// v1.0.6). Long-reasoning models on Pro tiers can hold a stream open
+	// for the full 2-hour ceiling between thinking + tool-use loops; the
+	// previous 1800s default chopped that mid-flight.
+	StreamIdleTimeout = envInt("DEEPSEEK_WEB_TO_API_STREAM_IDLE_TIMEOUT_SECONDS", 7200)
+	// MaxKeepaliveCount caps consecutive keep-alive frames before the
+	// stream is treated as dead. Scaled with StreamIdleTimeout: 7200s /
+	// 5s keep-alive interval = 1440 frames.
+	MaxKeepaliveCount = envInt("DEEPSEEK_WEB_TO_API_STREAM_MAX_KEEPALIVE_NO_CONTENT", 1440)
 )
 
 func envInt(name string, def int) int {

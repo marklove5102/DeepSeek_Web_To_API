@@ -15,6 +15,7 @@ import (
 	adminsettings "DeepSeek_Web_To_API/internal/httpapi/admin/settings"
 	adminshared "DeepSeek_Web_To_API/internal/httpapi/admin/shared"
 	adminversion "DeepSeek_Web_To_API/internal/httpapi/admin/version"
+	"DeepSeek_Web_To_API/internal/safetystore"
 )
 
 type Handler struct {
@@ -23,7 +24,9 @@ type Handler struct {
 	DS            adminshared.DeepSeekCaller
 	OpenAI        adminshared.OpenAIChatCaller
 	ChatHistory   *chathistory.Store
-	ResponseCache adminshared.ResponseCacheStatsProvider
+	ResponseCache adminshared.ResponseCacheRuntimeProvider
+	SafetyWords   *safetystore.WordsStore
+	SafetyIPs     *safetystore.IPsStore
 }
 
 func RegisterRoutes(r chi.Router, h *Handler) {
@@ -31,7 +34,7 @@ func RegisterRoutes(r chi.Router, h *Handler) {
 	authHandler := &adminauth.Handler{Store: deps.Store, Pool: deps.Pool, DS: deps.DS, OpenAI: deps.OpenAI, ChatHistory: deps.ChatHistory}
 	accountsHandler := &adminaccounts.Handler{Store: deps.Store, Pool: deps.Pool, DS: deps.DS, OpenAI: deps.OpenAI, ChatHistory: deps.ChatHistory}
 	configHandler := &adminconfig.Handler{Store: deps.Store, Pool: deps.Pool, DS: deps.DS, OpenAI: deps.OpenAI, ChatHistory: deps.ChatHistory}
-	settingsHandler := &adminsettings.Handler{Store: deps.Store, Pool: deps.Pool, DS: deps.DS, OpenAI: deps.OpenAI, ChatHistory: deps.ChatHistory}
+	settingsHandler := &adminsettings.Handler{Store: deps.Store, Pool: deps.Pool, DS: deps.DS, OpenAI: deps.OpenAI, ChatHistory: deps.ChatHistory, ResponseCache: deps.ResponseCache, SafetyWords: h.SafetyWords, SafetyIPs: h.SafetyIPs}
 	proxiesHandler := &adminproxies.Handler{Store: deps.Store, Pool: deps.Pool, DS: deps.DS, OpenAI: deps.OpenAI, ChatHistory: deps.ChatHistory}
 	rawSamplesHandler := &adminrawsamples.Handler{Store: deps.Store, Pool: deps.Pool, DS: deps.DS, OpenAI: deps.OpenAI, ChatHistory: deps.ChatHistory}
 	historyHandler := &adminhistory.Handler{Store: deps.Store, Pool: deps.Pool, DS: deps.DS, OpenAI: deps.OpenAI, ChatHistory: deps.ChatHistory}
@@ -67,5 +70,5 @@ type adminsharedDepsValue struct {
 	DS            adminshared.DeepSeekCaller
 	OpenAI        adminshared.OpenAIChatCaller
 	ChatHistory   *chathistory.Store
-	ResponseCache adminshared.ResponseCacheStatsProvider
+	ResponseCache adminshared.ResponseCacheRuntimeProvider
 }

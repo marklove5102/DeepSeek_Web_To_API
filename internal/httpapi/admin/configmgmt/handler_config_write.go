@@ -193,8 +193,11 @@ func (h *Handler) batchImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	importedKeys, importedAccounts := 0, 0
+	submittedKeys, submittedAccounts := 0, 0
+	duplicateAccounts, invalidAccounts := 0, 0
 	err := h.Store.Update(func(c *config.Config) error {
 		if apiKeys, ok := toAPIKeys(req["api_keys"]); ok {
+			submittedKeys += len(apiKeys)
 			var changed int
 			c.APIKeys, changed = mergeAPIKeysPreferStructured(c.APIKeys, apiKeys)
 			importedKeys += changed
@@ -208,52 +211,47 @@ func (h *Handler) batchImport(w http.ResponseWriter, r *http.Request) {
 				}
 				legacy = append(legacy, config.APIKey{Key: key})
 			}
+			submittedKeys += len(legacy)
 			var changed int
 			c.APIKeys, changed = mergeAPIKeysPreferStructured(c.APIKeys, legacy)
 			importedKeys += changed
 		}
-		if accounts, ok := req["accounts"].([]any); ok {
-			existing := map[string]bool{}
-			for _, a := range c.Accounts {
-				a = normalizeAccountForStorage(a)
-				key := accountDedupeKey(a)
-				if key != "" {
-					existing[key] = true
-				}
+		existing := map[string]bool{}
+		for _, a := range c.Accounts {
+			a = normalizeAccountForStorage(a)
+			key := accountDedupeKey(a)
+			if key != "" {
+				existing[key] = true
 			}
+		}
+		appendAccount := func(acc config.Account) {
+			submittedAccounts++
+			key := accountDedupeKey(acc)
+			if key == "" {
+				invalidAccounts++
+				return
+			}
+			if existing[key] {
+				duplicateAccounts++
+				return
+			}
+			c.Accounts = append(c.Accounts, acc)
+			existing[key] = true
+			importedAccounts++
+		}
+		if accounts, ok := req["accounts"].([]any); ok {
 			for _, item := range accounts {
 				m, ok := item.(map[string]any)
 				if !ok {
+					invalidAccounts++
+					submittedAccounts++
 					continue
 				}
-				acc := normalizeAccountForStorage(toAccount(m))
-				key := accountDedupeKey(acc)
-				if key == "" || existing[key] {
-					continue
-				}
-				c.Accounts = append(c.Accounts, acc)
-				existing[key] = true
-				importedAccounts++
+				appendAccount(normalizeAccountForStorage(toAccount(m)))
 			}
 		}
-		if len(textAccounts) > 0 {
-			existing := map[string]bool{}
-			for _, a := range c.Accounts {
-				a = normalizeAccountForStorage(a)
-				key := accountDedupeKey(a)
-				if key != "" {
-					existing[key] = true
-				}
-			}
-			for _, acc := range textAccounts {
-				key := accountDedupeKey(acc)
-				if key == "" || existing[key] {
-					continue
-				}
-				c.Accounts = append(c.Accounts, acc)
-				existing[key] = true
-				importedAccounts++
-			}
+		for _, acc := range textAccounts {
+			appendAccount(acc)
 		}
 		return nil
 	})
@@ -262,7 +260,48 @@ func (h *Handler) batchImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.Pool.Reset()
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "imported_keys": importedKeys, "imported_accounts": importedAccounts})
+
+	skippedKeys := submittedKeys - importedKeys
+	if skippedKeys < 0 {
+		skippedKeys = 0
+	}
+	skippedAccounts := duplicateAccounts + invalidAccounts
+
+	resp := map[string]any{
+		"success":            true,
+		"imported_keys":      importedKeys,
+		"imported_accounts":  importedAccounts,
+		"submitted_keys":     submittedKeys,
+		"submitted_accounts": submittedAccounts,
+		"skipped_keys":       skippedKeys,
+		"skipped_accounts":   skippedAccounts,
+		"duplicate_accounts": duplicateAccounts,
+		"invalid_accounts":   invalidAccounts,
+	}
+	if message := buildBatchImportMessage(submittedKeys, importedKeys, skippedKeys, submittedAccounts, importedAccounts, duplicateAccounts, invalidAccounts); message != "" {
+		resp["message"] = message
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func buildBatchImportMessage(submittedKeys, importedKeys, skippedKeys, submittedAccounts, importedAccounts, duplicateAccounts, invalidAccounts int) string {
+	parts := make([]string, 0, 2)
+	if submittedAccounts > 0 && importedAccounts == 0 {
+		switch {
+		case duplicateAccounts > 0 && invalidAccounts > 0:
+			parts = append(parts, fmt.Sprintf("未导入任何账号：%d 个已存在，%d 个格式无效", duplicateAccounts, invalidAccounts))
+		case duplicateAccounts > 0:
+			parts = append(parts, fmt.Sprintf("未导入任何账号：%d 个账号均已存在", duplicateAccounts))
+		case invalidAccounts > 0:
+			parts = append(parts, fmt.Sprintf("未导入任何账号：%d 个账号缺少邮箱或手机号", invalidAccounts))
+		default:
+			parts = append(parts, "未导入任何账号")
+		}
+	}
+	if submittedKeys > 0 && importedKeys == 0 {
+		parts = append(parts, fmt.Sprintf("未导入任何 API Key：%d 个已存在", skippedKeys))
+	}
+	return strings.Join(parts, "；")
 }
 
 func parsePlainAccountLines(raw string) ([]config.Account, error) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"runtime"
 	"strings"
@@ -28,7 +29,10 @@ import (
 	"DeepSeek_Web_To_API/internal/httpapi/openai/responses"
 	"DeepSeek_Web_To_API/internal/httpapi/openai/shared"
 	"DeepSeek_Web_To_API/internal/httpapi/requestbody"
+	"DeepSeek_Web_To_API/internal/requestguard"
+	"DeepSeek_Web_To_API/internal/requestmeta"
 	"DeepSeek_Web_To_API/internal/responsecache"
+	"DeepSeek_Web_To_API/internal/safetystore"
 	"DeepSeek_Web_To_API/internal/webui"
 )
 
@@ -56,9 +60,35 @@ func NewApp() (*App, error) {
 	} else {
 		config.Logger.Info("[PoW] pure Go solver ready")
 	}
-	chatHistoryStore := chathistory.NewSQLite(store.ChatHistorySQLitePath(), store.ChatHistoryPath())
+	chatHistoryStore := chathistory.NewSQLiteWithTokenStats(store.ChatHistorySQLitePath(), store.ChatHistoryPath(), store.TokenUsageSQLitePath())
 	if err := chatHistoryStore.Err(); err != nil {
 		config.Logger.Warn("[chat_history] unavailable", "path", chatHistoryStore.Path(), "error", err)
+	}
+
+	// Dedicated SQLite stores for the safety policy lists. These run in
+	// parallel to the legacy config.SafetyConfig list fields; on first start
+	// any pre-existing config-side lists are migrated into the store and
+	// future admin saves dual-write to keep both sources in sync.
+	safetyWordsStore, err := safetystore.NewWordsStore(store.SafetyWordsSQLitePath())
+	if err != nil {
+		config.Logger.Warn("[safety_words] unavailable", "path", store.SafetyWordsSQLitePath(), "error", err)
+	}
+	safetyIPsStore, err := safetystore.NewIPsStore(store.SafetyIPsSQLitePath())
+	if err != nil {
+		config.Logger.Warn("[safety_ips] unavailable", "path", store.SafetyIPsSQLitePath(), "error", err)
+	}
+	if safetyWordsStore != nil || safetyIPsStore != nil {
+		legacy := store.SafetyConfig()
+		if safetyWordsStore != nil {
+			if err := safetyWordsStore.MigrateLegacyOnce(legacy.BannedContent, legacy.BannedRegex, legacy.Jailbreak.Patterns); err != nil {
+				config.Logger.Warn("[safety_words] legacy migration failed", "error", err)
+			}
+		}
+		if safetyIPsStore != nil {
+			if err := safetyIPsStore.MigrateLegacyOnce(legacy.BlockedIPs, nil, legacy.BlockedConversationIDs); err != nil {
+				config.Logger.Warn("[safety_ips] legacy migration failed", "error", err)
+			}
+		}
 	}
 
 	modelsHandler := &shared.ModelsHandler{Store: store}
@@ -75,18 +105,31 @@ func NewApp() (*App, error) {
 		MaxBody:        store.ResponseCacheMaxBodyBytes(),
 		MemoryMaxBytes: store.ResponseCacheMemoryMaxBytes(),
 		DiskMaxBytes:   store.ResponseCacheDiskMaxBytes(),
+		SemanticKey:    store.ResponseCacheSemanticKey(),
 		OnHit:          responsesHandler.OnProtocolResponseCacheHit,
 	})
-	adminHandler := &admin.Handler{Store: store, Pool: pool, DS: dsClient, OpenAI: chatHandler, ChatHistory: chatHistoryStore, ResponseCache: protocolResponseCache}
+	adminHandler := &admin.Handler{Store: store, Pool: pool, DS: dsClient, OpenAI: chatHandler, ChatHistory: chatHistoryStore, ResponseCache: protocolResponseCache, SafetyWords: safetyWordsStore, SafetyIPs: safetyIPsStore}
 	webuiHandler := webui.NewHandler(store.StaticAdminDir())
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	// chi's middleware.RealIP unconditionally rewrites RemoteAddr from
+	// X-Forwarded-For / X-Real-IP / True-Client-IP regardless of who the
+	// peer is. That defeats the trusted-proxy model in
+	// requestmeta.ClientIP, which only honors those headers when the
+	// peer is in the trusted CIDR set. So we deliberately do NOT use
+	// middleware.RealIP here; ClientIP performs the equivalent
+	// resolution with proxy-trust enforcement.
 	r.Use(filteredLogger())
 	r.Use(middleware.Recoverer)
 	r.Use(cors)
 	r.Use(securityHeaders)
+	r.Use(requestguard.Middleware(requestguard.Options{
+		Store:       store,
+		ChatHistory: chatHistoryStore,
+		SafetyWords: safetyWordsStore,
+		SafetyIPs:   safetyIPsStore,
+	}))
 	r.Use(requestbody.ValidateJSONUTF8)
 	r.Use(timeout(0))
 	r.Use(protocolResponseCache.Middleware(resolver))
@@ -110,6 +153,15 @@ func NewApp() (*App, error) {
 	r.Post("/v1/chat/completions", chatHandler.ChatCompletions)
 	r.Post("/v1/responses", responsesHandler.Responses)
 	r.Get("/v1/responses/{response_id}", responsesHandler.GetResponseByID)
+	// Codex CLI may attempt server-side context compaction via this endpoint
+	// when context_management.compact_threshold is configured. We do not
+	// own the upstream Responses store and cannot honour the request, so we
+	// answer 501 (with the OpenAI-style error envelope) instead of 404 — the
+	// CLI then falls back to client-side context truncation rather than
+	// retrying indefinitely against a non-existent route.
+	r.Post("/v1/responses/compact", responsesCompactNotImplemented)
+	r.Post("/v1/v1/responses/compact", responsesCompactNotImplemented)
+	r.Post("/responses/compact", responsesCompactNotImplemented)
 	r.Post("/v1/files", filesHandler.UploadFile)
 	r.Post("/v1/embeddings", embeddingsHandler.Embeddings)
 	// Some SDK wrappers append their own /v1 prefix even when users configure
@@ -133,6 +185,7 @@ func NewApp() (*App, error) {
 	claude.RegisterRoutes(r, claudeHandler)
 	gemini.RegisterRoutes(r, geminiHandler)
 	r.Route("/admin", func(ar chi.Router) {
+		ar.Use(adminBrowserNavigationFallback(webuiHandler))
 		admin.RegisterRoutes(ar, adminHandler)
 	})
 	webui.RegisterRoutes(r, webuiHandler)
@@ -146,11 +199,55 @@ func NewApp() (*App, error) {
 	return &App{Store: store, Pool: pool, Resolver: resolver, DS: dsClient, Router: r}, nil
 }
 
+func adminBrowserNavigationFallback(webuiHandler *webui.Handler) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if isAdminBrowserNavigation(r) && webuiHandler.HandleAdminFallback(w, r) {
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func isAdminBrowserNavigation(r *http.Request) bool {
+	if r == nil || r.Method != http.MethodGet {
+		return false
+	}
+	path := strings.TrimSpace(r.URL.Path)
+	if !strings.HasPrefix(path, "/admin/") {
+		return false
+	}
+	rel := strings.TrimPrefix(path, "/admin/")
+	if rel == "" || strings.Contains(rel, ".") {
+		return false
+	}
+	if strings.TrimSpace(r.Header.Get("Authorization")) != "" {
+		return false
+	}
+	accept := strings.ToLower(r.Header.Get("Accept"))
+	if !strings.Contains(accept, "text/html") {
+		return false
+	}
+	mode := strings.TrimSpace(r.Header.Get("Sec-Fetch-Mode"))
+	return mode == "" || strings.EqualFold(mode, "navigate")
+}
+
 func timeout(d time.Duration) func(http.Handler) http.Handler {
 	if d <= 0 {
 		return func(next http.Handler) http.Handler { return next }
 	}
 	return middleware.Timeout(d)
+}
+
+// responsesCompactNotImplemented answers Codex CLI's optional
+// /v1/responses/compact requests with a structured 501 instead of a default
+// 404, so the CLI falls back to client-side truncation rather than treating
+// the route as missing infrastructure.
+func responsesCompactNotImplemented(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotImplemented)
+	_, _ = w.Write([]byte(`{"error":{"message":"Server-side context compaction is not supported by this proxy. Please rely on client-side context management.","type":"not_implemented","code":"compact_not_supported","param":null}}`))
 }
 
 func filteredLogger() func(http.Handler) http.Handler {
@@ -194,6 +291,16 @@ var defaultCORSAllowHeaders = []string{
 	"X-DeepSeek-Web-To-API-Source",
 	"X-Ds2-Target-Account",
 	"X-Ds2-Source",
+	"X-DeepSeek-Web-To-API-Conversation-ID",
+	"X-Ds2-Conversation-ID",
+	"X-Conversation-ID",
+	"Conversation-ID",
+	"X-Codex-Conversation-ID",
+	"X-Codex-Session-ID",
+	"X-OpenCode-Conversation-ID",
+	"X-OpenCode-Session-ID",
+	"OpenAI-Conversation-ID",
+	"Anthropic-Conversation-ID",
 	"X-Goog-Api-Key",
 	"Anthropic-Version",
 	"Anthropic-Beta",
@@ -224,13 +331,79 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		// Content-Security-Policy is applied to admin/webui responses
+		// only — the public API plane returns JSON / SSE consumed by
+		// SDKs that have no DOM, and shipping CSP there is noise.
+		// `default-src 'self'` blocks every external resource by
+		// default; `connect-src 'self' https://api.github.com` lets
+		// the dashboard's "check for new release" probe still reach
+		// the GitHub API; `script-src 'self'` blocks inline scripts
+		// (the React build emits hashed asset bundles, no inline);
+		// `style-src 'self' 'unsafe-inline'` is required by Tailwind
+		// keyframe + utility-class injection at runtime.
+		path := ""
+		if r.URL != nil {
+			path = r.URL.Path
+		}
+		if isWebAdminPath(path) {
+			w.Header().Set("Content-Security-Policy",
+				"default-src 'self'; "+
+					"script-src 'self'; "+
+					"style-src 'self' 'unsafe-inline'; "+
+					"img-src 'self' data:; "+
+					"font-src 'self' data:; "+
+					"connect-src 'self' https://api.github.com; "+
+					"frame-ancestors 'none'; "+
+					"base-uri 'self'; "+
+					"form-action 'self'")
+		}
 		next.ServeHTTP(w, r)
 	})
 }
 
+// isWebAdminPath returns true for the WebUI HTML / asset surface where
+// CSP is meaningful. The admin JSON API (/admin/*) and the public LLM
+// proxy plane do not render HTML and are excluded.
+func isWebAdminPath(path string) bool {
+	if path == "" || path == "/" {
+		return true
+	}
+	switch {
+	case strings.HasPrefix(path, "/static/"),
+		strings.HasPrefix(path, "/admin/"),
+		strings.HasPrefix(path, "/webui/"),
+		strings.HasPrefix(path, "/assets/"):
+		return true
+	}
+	return false
+}
+
 func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 	origin := strings.TrimSpace(r.Header.Get("Origin"))
-	if origin == "" {
+	path := ""
+	if r.URL != nil {
+		path = r.URL.Path
+	}
+	// /admin/* is the privileged plane — Bearer JWT authentication and
+	// stateful state mutation. Only echo the Origin when it is the same
+	// host the request was delivered to (same-origin). For any other
+	// origin we omit Access-Control-Allow-Origin entirely so the
+	// browser blocks the request before any handler runs. This closes
+	// the wildcard-reflect gap that combined with the localStorage JWT
+	// pattern would otherwise enable cross-origin token theft chains
+	// for an XSS-first attacker.
+	if isAdminPlane(path) {
+		if origin != "" && originMatchesHost(origin, r) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			addVaryHeaderToken(w.Header(), "Origin")
+		}
+		// else: leave Access-Control-Allow-Origin unset; preflight fails.
+	} else if origin == "" {
+		// Public API plane (/v1/*, /healthz, /readyz, etc.). Bearer-auth
+		// requests from non-browser SDKs do not set Origin — emit the
+		// open wildcard so existing OpenAI/Claude/Gemini SDK clients
+		// continue to work unchanged.
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 	} else {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
@@ -246,6 +419,31 @@ func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// isAdminPlane returns true for paths that mutate privileged state and
+// must not accept cross-origin requests. The webui static assets at
+// /admin/index.html etc. are intentionally NOT included — those are
+// fetched same-origin by the browser before any cross-origin script
+// has a chance to run.
+func isAdminPlane(path string) bool {
+	return strings.HasPrefix(path, "/admin/")
+}
+
+// originMatchesHost compares the scheme://host of the Origin header
+// against the request's own Host header. The Origin string is parsed
+// strictly — scheme and host must match; port presence/absence on
+// either side requires explicit equality.
+func originMatchesHost(origin string, r *http.Request) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	host := strings.TrimSpace(r.Host)
+	if host == "" {
+		return false
+	}
+	return strings.EqualFold(u.Host, host)
+}
+
 func buildCORSAllowHeaders(r *http.Request) string {
 	names := make([]string, 0, len(defaultCORSAllowHeaders)+4)
 	seen := make(map[string]struct{}, len(defaultCORSAllowHeaders)+4)
@@ -256,6 +454,9 @@ func buildCORSAllowHeaders(r *http.Request) string {
 		return strings.Join(names, ", ")
 	}
 	for _, name := range splitCORSRequestHeaders(r.Header.Get("Access-Control-Request-Headers")) {
+		appendCORSHeaderName(&names, seen, name)
+	}
+	for _, name := range requestmeta.ConversationIDHeaders {
 		appendCORSHeaderName(&names, seen, name)
 	}
 	return strings.Join(names, ", ")

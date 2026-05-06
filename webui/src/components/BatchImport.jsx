@@ -157,6 +157,18 @@ export default function BatchImport({ onRefresh, onMessage, authFetch }) {
                                 <p className="text-sm opacity-80 mt-1">
                                     {t('batchImport.importSummary', { keys: result.imported_keys, accounts: result.imported_accounts })}
                                 </p>
+                                {result.message && (
+                                    <p className="text-xs opacity-70 mt-1">{result.message}</p>
+                                )}
+                                {(result.duplicate_accounts > 0 || result.invalid_accounts > 0 || result.skipped_keys > 0) && (
+                                    <p className="text-xs opacity-60 mt-1">
+                                        {result.duplicate_accounts > 0 && `已存在 ${result.duplicate_accounts} 个账号`}
+                                        {result.duplicate_accounts > 0 && result.invalid_accounts > 0 && ' · '}
+                                        {result.invalid_accounts > 0 && `无效 ${result.invalid_accounts} 个账号`}
+                                        {(result.duplicate_accounts > 0 || result.invalid_accounts > 0) && result.skipped_keys > 0 && ' · '}
+                                        {result.skipped_keys > 0 && `已存在 ${result.skipped_keys} 个 Key`}
+                                    </p>
+                                )}
                             </div>
                         </div>
                     </div>

@@ -18,13 +18,44 @@ var leakedThinkTagPattern = regexp.MustCompile(`(?is)</?\s*think\s*>`)
 //   - U+2581 variant:   <｜begin▁of▁sentence｜>
 var leakedBOSMarkerPattern = regexp.MustCompile(`(?i)<[｜\|]\s*begin[_▁]of[_▁]sentence\s*[｜\|]>`)
 var leakedPromptRoleMarkerPattern = regexp.MustCompile(`(?i)<[｜\|]\s*(?:system|user)\s*[｜\|]>`)
-var leakedToolResultStartMarkerPattern = regexp.MustCompile(`(?i)<[｜\|]\s*tool[_▁]results?\s*/?\s*(?:[｜\|])?>`)
-var leakedToolResultEndMarkerPattern = regexp.MustCompile(`(?i)<[｜\|]\s*end[_▁](?:f[_▁])?of[_▁](?:tool[_▁]?results?|sentence)\s*/?\s*(?:[｜\|])?>`)
+
+// Note: marker close fragments accept both ASCII '/' and full-width '／' (U+FF0F)
+// because models sometimes emit the full-width form (observed in the wild as
+// "<｜Tool／>"). Likewise the trailing fence accepts the full-width "｜" or
+// ASCII "|" before the closing ">".
+var leakedToolResultStartMarkerPattern = regexp.MustCompile(`(?i)<[｜\|]\s*tool[_▁]results?\s*[/／]?\s*(?:[｜\|])?>`)
+var leakedToolResultEndMarkerPattern = regexp.MustCompile(`(?i)<[｜\|]\s*end[_▁](?:f[_▁])?of[_▁](?:tool[_▁]?results?|sentence)\s*[/／]?\s*(?:[｜\|])?>`)
 
 // leakedMetaMarkerPattern matches the remaining DeepSeek special tokens in BOTH forms:
 //   - ASCII underscore: <｜end_of_sentence｜>, <｜end_of_toolresults｜>, <｜end_of_instructions｜>
 //   - U+2581 variant:   <｜end▁of▁sentence｜>, <｜end▁of▁toolresults｜>, <｜end▁of▁instructions｜>
-var leakedMetaMarkerPattern = regexp.MustCompile(`(?i)<[｜\|]\s*(?:assistant|tool|tool[_▁]results?|end[_▁](?:f[_▁])?of[_▁]sentence|end[_▁](?:f[_▁])?of[_▁]thinking|end[_▁](?:f[_▁])?of[_▁]tool[_▁]?results?|end[_▁](?:f[_▁])?of[_▁]instructions)\s*/?\s*(?:[｜\|])?>`)
+//
+// The trailing close also tolerates full-width '／' so spelling like
+// "<｜Tool／>" is removed even though it isn't a valid XML self-close.
+var leakedMetaMarkerPattern = regexp.MustCompile(`(?i)<[｜\|]\s*(?:assistant|tool|tool[_▁]results?|end[_▁](?:f[_▁])?of[_▁]sentence|end[_▁](?:f[_▁])?of[_▁]thinking|end[_▁](?:f[_▁])?of[_▁]tool[_▁]?results?|end[_▁](?:f[_▁])?of[_▁]instructions)\s*[/／]?\s*(?:[｜\|])?>`)
+
+// leakedDSMLMarkupFragmentPattern strips raw DSML / tool-markup fragments that
+// the streaming sieve failed to capture (typically because the upstream stream
+// truncated mid-block). It matches BOTH well-formed openings like
+//
+//	<|tool_calls>
+//	<|DSML|invoke name="Bash">
+//	<|DSML|parameter name="command">
+//	</|DSML|parameter>
+//	</|DSML|invoke>
+//	</|DSML|tool_calls>
+//
+// AND open fragments that lack a closing '>' but were left dangling by a
+// truncated stream (e.g. "<|tool_calls" alone on a line). The pattern is
+// deliberately limited to known DSML/tool keywords so it does not erase
+// unrelated text that happens to start with "<|".
+var leakedDSMLMarkupFragmentPattern = regexp.MustCompile(`(?im)<\s*/?\s*\|\s*(?:DSML\s*\|\s*)?(?:tool_calls?|invoke|parameter|tool_use|tool_result|function_call|tool|DSML)(?:[^\n>]*>|[^\n>]*$)`)
+
+// leakedTrailingPipeTagPattern strips a tail like "<|end_of_tool_result|tool_use_error: ..."
+// where the marker name and following payload share the same '|' fence without
+// a '>' close. We anchor the match to a known marker name to keep the rule
+// safe.
+var leakedTrailingPipeTagPattern = regexp.MustCompile(`(?i)<\s*\|\s*end[_▁](?:f[_▁])?of[_▁](?:sentence|tool[_▁]?results?|thinking|instructions)\s*\|[^\n>]+`)
 var leakedANGTemplatePattern = regexp.MustCompile("(?i)(?:V\\d+Dynamic\\s*)?(?:`?[A-Za-z0-9_./:-]*format)?`?\\s*\\{\\{ANG\\}\\}")
 
 // leakedAgentXMLBlockPatterns catch agent-style XML blocks that leak through
@@ -63,10 +94,12 @@ func sanitizeLeakedOutputWithOptions(text string, stripToolMarkup bool) string {
 	out = leakedThinkTagPattern.ReplaceAllString(out, "")
 	out = leakedBOSMarkerPattern.ReplaceAllString(out, "")
 	out = leakedPromptRoleMarkerPattern.ReplaceAllString(out, "")
+	out = leakedTrailingPipeTagPattern.ReplaceAllString(out, "")
 	out = leakedMetaMarkerPattern.ReplaceAllString(out, "")
 	out = leakedANGTemplatePattern.ReplaceAllString(out, "")
 	if stripToolMarkup {
 		out = stripLeakedToolCallWrapperBlocks(out)
+		out = leakedDSMLMarkupFragmentPattern.ReplaceAllString(out, "")
 	}
 	out = sanitizeLeakedAgentXMLBlocks(out)
 	return out

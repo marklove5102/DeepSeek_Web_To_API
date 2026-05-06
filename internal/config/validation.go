@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -16,6 +17,9 @@ func ValidateConfig(c Config) error {
 		return err
 	}
 	if err := ValidateCacheConfig(c.Cache); err != nil {
+		return err
+	}
+	if err := ValidateSafetyConfig(c.Safety); err != nil {
 		return err
 	}
 	if err := ValidateRuntimeConfig(c.Runtime); err != nil {
@@ -116,6 +120,56 @@ func ValidateCacheConfig(cache CacheConfig) error {
 		return err
 	}
 	return ValidateInt64Range("cache.response.disk_max_bytes", response.DiskMaxBytes, 1, 1<<42, false)
+}
+
+func ValidateSafetyConfig(safety SafetyConfig) error {
+	if err := validateStringList("safety.blocked_ips", safety.BlockedIPs, 256); err != nil {
+		return err
+	}
+	if err := validateStringList("safety.allowed_ips", safety.AllowedIPs, 256); err != nil {
+		return err
+	}
+	if err := validateStringList("safety.blocked_conversation_ids", safety.BlockedConversationIDs, 256); err != nil {
+		return err
+	}
+	if err := validateStringList("safety.banned_content", safety.BannedContent, 4096); err != nil {
+		return err
+	}
+	if err := validateStringList("safety.jailbreak.patterns", safety.Jailbreak.Patterns, 4096); err != nil {
+		return err
+	}
+	for _, pattern := range safety.BannedRegex {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		if len(pattern) > 4096 {
+			return fmt.Errorf("safety.banned_regex item is too long")
+		}
+		if _, err := regexp.Compile(pattern); err != nil {
+			return fmt.Errorf("safety.banned_regex invalid pattern: %w", err)
+		}
+	}
+	if safety.AutoBan.Threshold < 0 || safety.AutoBan.Threshold > 1_000_000 {
+		return fmt.Errorf("safety.auto_ban.threshold out of range: %d", safety.AutoBan.Threshold)
+	}
+	if safety.AutoBan.WindowSeconds < 0 || safety.AutoBan.WindowSeconds > 30*24*60*60 {
+		return fmt.Errorf("safety.auto_ban.window_seconds out of range: %d", safety.AutoBan.WindowSeconds)
+	}
+	return nil
+}
+
+func validateStringList(name string, values []string, maxLen int) error {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if len(value) > maxLen {
+			return fmt.Errorf("%s item is too long", name)
+		}
+	}
+	return nil
 }
 
 func ValidateRuntimeConfig(runtime RuntimeConfig) error {

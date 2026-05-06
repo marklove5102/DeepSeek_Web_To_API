@@ -43,7 +43,12 @@ func (h *Handler) configImport(w http.ResponseWriter, r *http.Request) {
 	}
 	incoming.ClearAccountTokens()
 
-	importedKeys, importedAccounts := 0, 0
+	hasPayloadKey := func(key string) bool {
+		_, ok := payload[key]
+		return ok
+	}
+
+	importedKeys, importedAccounts, importedProxies := 0, 0, 0
 	err = h.Store.Update(func(c *config.Config) error {
 		next := c.Clone()
 		if mode == "replace" {
@@ -51,6 +56,7 @@ func (h *Handler) configImport(w http.ResponseWriter, r *http.Request) {
 			next.Accounts = normalizeAndDedupeAccounts(next.Accounts)
 			importedKeys = len(next.APIKeys)
 			importedAccounts = len(next.Accounts)
+			importedProxies = len(next.Proxies)
 		} else {
 			var changed int
 			next.APIKeys, changed = mergeAPIKeysPreferStructured(next.APIKeys, incoming.APIKeys)
@@ -76,6 +82,28 @@ func (h *Handler) configImport(w http.ResponseWriter, r *http.Request) {
 				existingAccounts[key] = struct{}{}
 				next.Accounts = append(next.Accounts, acc)
 				importedAccounts++
+			}
+
+			// Merge proxies by stable id; existing entries are preserved (do not
+			// overwrite user-edited credentials), new ids are appended.
+			existingProxies := map[string]struct{}{}
+			for _, p := range next.Proxies {
+				p = config.NormalizeProxy(p)
+				if p.ID != "" {
+					existingProxies[p.ID] = struct{}{}
+				}
+			}
+			for _, p := range incoming.Proxies {
+				p = config.NormalizeProxy(p)
+				if p.ID == "" {
+					continue
+				}
+				if _, ok := existingProxies[p.ID]; ok {
+					continue
+				}
+				existingProxies[p.ID] = struct{}{}
+				next.Proxies = append(next.Proxies, p)
+				importedProxies++
 			}
 
 			if len(incoming.ModelAliases) > 0 {
@@ -113,6 +141,61 @@ func (h *Handler) configImport(w http.ResponseWriter, r *http.Request) {
 			if incoming.Runtime.TokenRefreshIntervalHours > 0 {
 				next.Runtime.TokenRefreshIntervalHours = incoming.Runtime.TokenRefreshIntervalHours
 			}
+			// Whole-block sections: when payload provides the key, replace
+			// the corresponding subtree wholesale. Use payload presence
+			// (not Go zero-value) so that explicit empty lists/disables work.
+			if hasPayloadKey("safety") {
+				next.Safety = incoming.Safety
+			}
+			if hasPayloadKey("cache") {
+				next.Cache = incoming.Cache
+			}
+			if hasPayloadKey("compat") {
+				next.Compat = incoming.Compat
+			}
+			if hasPayloadKey("auto_delete") {
+				next.AutoDelete = incoming.AutoDelete
+			}
+			if hasPayloadKey("history_split") {
+				next.HistorySplit = incoming.HistorySplit
+			}
+			if hasPayloadKey("current_input_file") {
+				next.CurrentInputFile = incoming.CurrentInputFile
+			}
+			if hasPayloadKey("thinking_injection") {
+				next.ThinkingInjection = incoming.ThinkingInjection
+			}
+			// Storage paths: when payload provides "storage" we replace the
+			// whole subtree so newly added fields (e.g. token_usage_sqlite_path)
+			// survive a round-trip through export → import. Operators who do
+			// not want to overwrite local paths simply omit the key from the
+			// payload they upload.
+			if hasPayloadKey("storage") {
+				next.Storage = incoming.Storage
+			}
+			// Server block: be selective. Port and BindAddr are deployment-
+			// specific (e.g. one host listens on 127.0.0.1, another on
+			// 0.0.0.0) and should never be cloned from another machine via
+			// "merge". Logical knobs (log level, total timeout, auto-build
+			// WebUI, static admin dir, remote file upload toggle) are safe
+			// to apply when explicitly provided.
+			if rawServer, ok := payload["server"].(map[string]any); ok {
+				if _, present := rawServer["log_level"]; present {
+					next.Server.LogLevel = incoming.Server.LogLevel
+				}
+				if _, present := rawServer["http_total_timeout_seconds"]; present {
+					next.Server.HTTPTotalTimeoutSeconds = incoming.Server.HTTPTotalTimeoutSeconds
+				}
+				if _, present := rawServer["auto_build_webui"]; present {
+					next.Server.AutoBuildWebUI = incoming.Server.AutoBuildWebUI
+				}
+				if _, present := rawServer["static_admin_dir"]; present {
+					next.Server.StaticAdminDir = incoming.Server.StaticAdminDir
+				}
+				if _, present := rawServer["remote_file_upload_enabled"]; present {
+					next.Server.RemoteFileUploadEnabled = incoming.Server.RemoteFileUploadEnabled
+				}
+			}
 		}
 
 		normalizeSettingsConfig(&next)
@@ -138,6 +221,7 @@ func (h *Handler) configImport(w http.ResponseWriter, r *http.Request) {
 		"mode":              mode,
 		"imported_keys":     importedKeys,
 		"imported_accounts": importedAccounts,
+		"imported_proxies":  importedProxies,
 		"message":           "config imported",
 	})
 }

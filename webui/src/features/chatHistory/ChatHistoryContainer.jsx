@@ -613,6 +613,14 @@ function DetailConversation({ selectedItem, t, viewMode, detailScrollRef, assist
                         <div className="text-[11px] text-muted-foreground">{t('chatHistory.metaCaller')}</div>
                         <div className="text-sm font-medium text-foreground break-all">{selectedItem.caller_id || t('chatHistory.metaUnknown')}</div>
                     </div>
+                    <div className="rounded-lg border border-border bg-card px-3 py-2">
+                        <div className="text-[11px] text-muted-foreground">{t('chatHistory.metaRequestIP')}</div>
+                        <div className="text-sm font-medium text-foreground break-all">{selectedItem.request_ip || t('chatHistory.metaUnknown')}</div>
+                    </div>
+                    <div className="rounded-lg border border-border bg-card px-3 py-2">
+                        <div className="text-[11px] text-muted-foreground">{t('chatHistory.metaConversationID')}</div>
+                        <div className="text-sm font-medium text-foreground break-all">{selectedItem.conversation_id || t('chatHistory.metaUnknown')}</div>
+                    </div>
                 </div>
             </div>
 
@@ -1112,6 +1120,22 @@ export default function ChatHistoryContainer({ authFetch, onMessage }) {
                                 <div className="text-xs text-muted-foreground mt-3 line-clamp-2 whitespace-pre-wrap break-words">
                                     {previewText(item) || t('chatHistory.noPreview')}
                                 </div>
+                                {(item.request_ip || item.conversation_id) && (
+                                    <div className="text-[11px] text-muted-foreground/70 mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+                                        {item.request_ip && (
+                                            <span className="inline-flex items-center gap-1">
+                                                <span className="opacity-70">IP</span>
+                                                <span className="font-mono">{item.request_ip}</span>
+                                            </span>
+                                        )}
+                                        {item.conversation_id && (
+                                            <span className="inline-flex items-center gap-1 min-w-0">
+                                                <span className="opacity-70">{t('chatHistory.metaConversationID')}</span>
+                                                <span className="font-mono truncate max-w-[160px]" title={item.conversation_id}>{item.conversation_id}</span>
+                                            </span>
+                                        )}
+                                    </div>
+                                )}
                                 <div className="text-[11px] text-muted-foreground/80 mt-3">
                                     {formatDateTime(item.completed_at || item.updated_at || item.created_at, lang)}
                                 </div>
