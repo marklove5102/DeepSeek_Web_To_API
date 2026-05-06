@@ -85,6 +85,20 @@ func parseSingleXMLToolCall(block xmlElementBlock) (ParsedToolCall, bool) {
 			return ParsedToolCall{Name: name, Input: input}, true
 		}
 	}
+	// Some models (and upstream-derived clients) emit a bare JSON array as
+	// the entire <invoke> body when the tool's input schema is itself an
+	// array — e.g. MultiEdit with `[{old:..., new:...}, ...]`. The
+	// previous behaviour rejected these; we now accept them and surface
+	// the array under a conventional `items` key so downstream tool
+	// runners that expect an object can still address the value. Aligned
+	// with CJackHwang/ds2api 1c38709d, rewritten on top of our existing
+	// XML-parameter-first parsing path.
+	if strings.HasPrefix(inner, "[") {
+		var arr []any
+		if err := json.Unmarshal([]byte(inner), &arr); err == nil {
+			return ParsedToolCall{Name: name, Input: map[string]any{"items": arr}}, true
+		}
+	}
 
 	input := map[string]any{}
 	for _, paramMatch := range findXMLElementBlocks(inner, "parameter") {

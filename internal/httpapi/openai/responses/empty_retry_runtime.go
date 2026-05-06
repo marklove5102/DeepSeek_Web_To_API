@@ -140,12 +140,16 @@ func (h *Handler) finishResponsesNonStreamResult(w http.ResponseWriter, result r
 	config.Logger.Info("[openai_empty_retry] completed", "surface", "responses", "stream", false, "retry_attempts", attempts, "success_source", source)
 }
 
+// shouldRetryResponsesNonStream — see chat counterpart for rationale.
+// Thinking-only responses (text empty, reasoning trace present) flow
+// through as success and are NOT retried.
 func shouldRetryResponsesNonStream(result responsesNonStreamResult, attempts int) bool {
 	return emptyOutputRetryEnabled() &&
 		attempts < emptyOutputRetryMaxAttempts() &&
 		!result.contentFilter &&
 		len(result.parsed.Calls) == 0 &&
-		strings.TrimSpace(result.text) == ""
+		strings.TrimSpace(result.text) == "" &&
+		strings.TrimSpace(result.thinking) == ""
 }
 
 func (h *Handler) handleResponsesStreamWithRetry(w http.ResponseWriter, r *http.Request, a *auth.RequestAuth, resp *http.Response, payload map[string]any, pow, owner, responseID, model, finalPrompt string, refFileTokens int, thinkingEnabled, searchEnabled bool, toolNames []string, toolsRaw any, toolChoice promptcompat.ToolChoicePolicy, traceID string, historySession *historycapture.Session) {
@@ -280,6 +284,12 @@ func (h *Handler) consumeResponsesStreamAttempt(r *http.Request, resp *http.Resp
 
 func recordResponsesStreamHistory(streamRuntime *responsesStreamRuntime, historySession *historycapture.Session) {
 	if historySession == nil || streamRuntime == nil {
+		return
+	}
+	// See chat counterpart — context-cancelled streams already wrote a
+	// stopped history record from OnContextDone; do not overwrite with
+	// an error record. CJackHwang/ds2api 0bca6e2c.
+	if streamRuntime.finalErrorCode == string(streamengine.StopReasonContextCancelled) {
 		return
 	}
 	if streamRuntime.finalErrorMessage != "" {

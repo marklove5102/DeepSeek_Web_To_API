@@ -441,7 +441,10 @@ func TestHandleResponsesNonStreamReturnsContentFilterErrorWhenUpstreamFilteredWi
 	}
 }
 
-func TestHandleResponsesNonStreamReturns429WhenUpstreamHasOnlyThinking(t *testing.T) {
+// TestHandleResponsesNonStreamAcceptsThinkingOnlyAs200 — see chat
+// counterpart for rationale. Reasoning-only responses are no longer
+// classified as `upstream_empty_output`.
+func TestHandleResponsesNonStreamAcceptsThinkingOnlyAs200(t *testing.T) {
 	h := &Handler{}
 	rec := httptest.NewRecorder()
 	resp := &http.Response{
@@ -453,13 +456,12 @@ func TestHandleResponsesNonStreamReturns429WhenUpstreamHasOnlyThinking(t *testin
 	}
 
 	h.handleResponsesNonStream(rec, resp, "owner-a", "resp_test", "deepseek-v4-pro", "prompt", 0, true, false, nil, nil, promptcompat.DefaultToolChoicePolicy(), "")
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("expected 429 for thinking-only upstream output, got %d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for thinking-only upstream output, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	out := decodeJSONBody(t, rec.Body.String())
-	errObj, _ := out["error"].(map[string]any)
-	if asString(errObj["code"]) != "upstream_empty_output" {
-		t.Fatalf("expected code=upstream_empty_output, got %#v", out)
+	if errObj, ok := out["error"]; ok && errObj != nil {
+		t.Fatalf("did not expect error envelope, got %#v", out)
 	}
 }
 

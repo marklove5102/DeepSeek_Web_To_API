@@ -57,6 +57,34 @@ test('parseToolCalls parses DSML shell as XML-compatible tool call', () => {
   assert.deepEqual(calls[0].input, { path: 'README.MD' });
 });
 
+test('parseToolCalls tolerates hyphenated DSML tag variants (Cherry Studio + adapters)', () => {
+  // Cherry Studio + some upstream-derived adapters emit DSML tags with
+  // a hyphen separator (`<dsml-tool-calls>`) instead of the canonical
+  // pipe-prefixed form. Mirror of the Go-side TestParseToolCalls
+  // ToleratesHyphenatedDSMLTags. Aligned with CJackHwang/ds2api
+  // 2f7cb473 + 545ab080.
+  const cases = [
+    {
+      label: 'hyphenated dsml prefix',
+      payload: '<dsml-tool-calls><dsml-invoke name="Bash"><dsml-parameter name="command"><![CDATA[pwd]]></dsml-parameter></dsml-invoke></dsml-tool-calls>',
+    },
+    {
+      label: 'underscore-separated dsml prefix',
+      payload: '<dsml_tool_calls><dsml_invoke name="Bash"><dsml_parameter name="command"><![CDATA[pwd]]></dsml_parameter></dsml_invoke></dsml_tool_calls>',
+    },
+    {
+      label: 'mixed hyphen and underscore',
+      payload: '<dsml-tool_calls><dsml-invoke name="Bash"><dsml_parameter name="command"><![CDATA[pwd]]></dsml_parameter></dsml-invoke></dsml-tool_calls>',
+    },
+  ];
+  for (const tc of cases) {
+    const calls = parseToolCalls(tc.payload, ['Bash']);
+    assert.equal(calls.length, 1, `${tc.label}: expected 1 call`);
+    assert.equal(calls[0].name, 'Bash', `${tc.label}: tool name`);
+    assert.deepEqual(calls[0].input, { command: 'pwd' }, `${tc.label}: command`);
+  }
+});
+
 test('parseToolCalls tolerates pipe-variant CDATA opener (DeepSeek emission)', () => {
   // Real-world: DeepSeek bleeds the surrounding <|DSML|...|> pipe convention
   // into the CDATA opener, producing <![CDATA|VALUE]]> rather than <![CDATA[VALUE]]>.

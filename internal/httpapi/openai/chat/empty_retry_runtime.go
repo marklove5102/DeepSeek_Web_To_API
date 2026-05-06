@@ -116,7 +116,7 @@ func (h *Handler) finishChatNonStreamResult(w http.ResponseWriter, result chatNo
 		writeOpenAIErrorWithCode(w, http.StatusUnprocessableEntity, message, "tool_choice_violation")
 		return
 	}
-	if result.detectedCalls == 0 && shouldWriteUpstreamEmptyOutputError(result.text) {
+	if result.detectedCalls == 0 && shouldWriteUpstreamEmptyOutputError(result.text, result.thinking) {
 		status, message, code := upstreamEmptyOutputDetail(result.contentFilter, result.text, result.thinking)
 		if historySession != nil {
 			historySession.error(status, message, code, result.thinking, result.text)
@@ -145,12 +145,20 @@ func chatFinishReason(respBody map[string]any) string {
 	return "stop"
 }
 
+// shouldRetryChatNonStream decides whether to fire a synthetic regeneration
+// retry when the upstream returned no visible content. v1.0.3-cnb: a
+// thinking-only response (text empty but reasoning trace present) is now
+// accepted as success, NOT retried — repeated retries against a model that
+// is intentionally producing only reasoning content (DeepSeek Pro under
+// some prompts) burn upstream quota without converging. Empty-on-both
+// paths still retry as before.
 func shouldRetryChatNonStream(result chatNonStreamResult, attempts int) bool {
 	return emptyOutputRetryEnabled() &&
 		attempts < emptyOutputRetryMaxAttempts() &&
 		!result.contentFilter &&
 		result.detectedCalls == 0 &&
-		strings.TrimSpace(result.text) == ""
+		strings.TrimSpace(result.text) == "" &&
+		strings.TrimSpace(result.thinking) == ""
 }
 
 func (h *Handler) handleStreamWithRetry(w http.ResponseWriter, r *http.Request, a *auth.RequestAuth, resp *http.Response, payload map[string]any, pow, completionID, model, finalPrompt string, refFileTokens int, thinkingEnabled, exposeReasoning, searchEnabled bool, toolNames []string, toolsRaw any, requireToolCall bool, historySession *chatHistorySession, activeSessionID *string) {
@@ -285,6 +293,15 @@ func (h *Handler) consumeChatStreamAttempt(r *http.Request, resp *http.Response,
 
 func recordChatStreamHistory(streamRuntime *chatStreamRuntime, historySession *chatHistorySession) {
 	if historySession == nil {
+		return
+	}
+	// Context-cancelled streams already wrote a `stopped` history record
+	// from the OnContextDone callback. Do NOT overwrite it with an error
+	// record here — that would convert "client cancelled" into "server
+	// errored" in admin metrics, polluting the failure rate denominator
+	// and erasing the legitimate stopped reason. Aligned with upstream
+	// CJackHwang/ds2api 0bca6e2c.
+	if streamRuntime.finalErrorCode == string(streamengine.StopReasonContextCancelled) {
 		return
 	}
 	if streamRuntime.finalErrorMessage != "" {

@@ -255,7 +255,7 @@ func firstHistorySession(historySessions []*historycapture.Session) *historycapt
 }
 
 func shouldWriteClaudeEmptyOutputError(finalText, finalThinking string, contentFilter bool, toolNames []string) bool {
-	if !openaishared.ShouldWriteUpstreamEmptyOutputError(finalText) {
+	if !openaishared.ShouldWriteUpstreamEmptyOutputError(finalText, finalThinking) {
 		return false
 	}
 	if len(toolcall.ParseToolCalls(finalText, toolNames)) > 0 {
