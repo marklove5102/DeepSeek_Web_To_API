@@ -301,8 +301,25 @@ func (c *Cache) Wrap(resolver CallerResolver, next http.Handler) http.Handler {
 				return
 			}
 			// Owner finished but did not produce a cacheable entry, OR we
-			// timed out — fall through and run our own upstream call. Note
-			// we are NOT the owner: do not release the slot.
+			// timed out. Try to claim ownership ourselves before falling
+			// through to upstream — if we succeed, subsequent waiters
+			// (including any other timed-out ones) collapse onto us
+			// instead of all stampeding the LLM backend simultaneously.
+			slot, isOwner = c.acquireInflight(key)
+			if !isOwner {
+				// Another goroutine became the owner while we were
+				// waking up. Wait on it once more with a fresh budget.
+				waited, served = c.waitForInflightOwner(w, r, slot, key, policy)
+				if served {
+					return
+				}
+				if !waited {
+					return
+				}
+				// Two sequential owners both produced nothing cacheable
+				// — at this point we accept the fall-through and run
+				// upstream ourselves without holding the slot.
+			}
 		}
 
 		r.Body = io.NopCloser(bytes.NewReader(rawBody))
@@ -1160,30 +1177,39 @@ type diskCacheFile struct {
 }
 
 func (c *Cache) enforceDiskLimit(now time.Time) {
-	if c.dir == "" || c.diskMaxBytes <= 0 {
+	c.mu.Lock()
+	dir := c.dir
+	diskTTL := c.diskTTL
+	maxBytes := c.diskMaxBytes
+	c.mu.Unlock()
+	if dir == "" || maxBytes <= 0 {
 		return
 	}
-	files, total := c.diskFiles(now)
-	if total <= c.diskMaxBytes {
+	files, total := c.diskFilesAt(dir, diskTTL, now)
+	if total <= maxBytes {
 		return
 	}
 	sort.Slice(files, func(i, j int) bool {
 		return files[i].modTime.Before(files[j].modTime)
 	})
 	for _, file := range files {
-		if total <= c.diskMaxBytes {
+		if total <= maxBytes {
 			return
 		}
-		if err := removeDiskCacheFile(c.dir, file.path); err == nil {
+		if err := removeDiskCacheFile(dir, file.path); err == nil {
 			total -= file.size
 		}
 	}
 }
 
-func (c *Cache) diskFiles(now time.Time) ([]diskCacheFile, int64) {
+// diskFilesAt walks the cache directory using a snapshot of (dir, diskTTL)
+// captured under c.mu by the caller. Reading these from the Cache struct
+// directly inside the WalkDir callback is racy with ApplyOptions hot
+// reload, which mutates them under the same mutex.
+func (c *Cache) diskFilesAt(dir string, diskTTL time.Duration, now time.Time) ([]diskCacheFile, int64) {
 	files := []diskCacheFile{}
 	var total int64
-	_ = filepath.WalkDir(c.dir, func(path string, d os.DirEntry, err error) error {
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d == nil || d.IsDir() || !strings.HasSuffix(path, ".json.gz") {
 			return nil
 		}
@@ -1191,8 +1217,8 @@ func (c *Cache) diskFiles(now time.Time) ([]diskCacheFile, int64) {
 		if statErr != nil {
 			return nil
 		}
-		if c.diskTTL > 0 && now.Sub(info.ModTime()) > c.diskTTL {
-			_ = removeDiskCacheFile(c.dir, path)
+		if diskTTL > 0 && now.Sub(info.ModTime()) > diskTTL {
+			_ = removeDiskCacheFile(dir, path)
 			return nil
 		}
 		size := info.Size()

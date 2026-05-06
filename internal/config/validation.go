@@ -126,6 +126,9 @@ func ValidateSafetyConfig(safety SafetyConfig) error {
 	if err := validateStringList("safety.blocked_ips", safety.BlockedIPs, 256); err != nil {
 		return err
 	}
+	if err := validateStringList("safety.allowed_ips", safety.AllowedIPs, 256); err != nil {
+		return err
+	}
 	if err := validateStringList("safety.blocked_conversation_ids", safety.BlockedConversationIDs, 256); err != nil {
 		return err
 	}
@@ -146,6 +149,12 @@ func ValidateSafetyConfig(safety SafetyConfig) error {
 		if _, err := regexp.Compile(pattern); err != nil {
 			return fmt.Errorf("safety.banned_regex invalid pattern: %w", err)
 		}
+	}
+	if safety.AutoBan.Threshold < 0 || safety.AutoBan.Threshold > 1_000_000 {
+		return fmt.Errorf("safety.auto_ban.threshold out of range: %d", safety.AutoBan.Threshold)
+	}
+	if safety.AutoBan.WindowSeconds < 0 || safety.AutoBan.WindowSeconds > 30*24*60*60 {
+		return fmt.Errorf("safety.auto_ban.window_seconds out of range: %d", safety.AutoBan.WindowSeconds)
 	}
 	return nil
 }

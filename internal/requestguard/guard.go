@@ -98,10 +98,23 @@ func newAutoBanTracker(safetyIPs *safetystore.IPsStore, policies *policyCache) *
 	}
 }
 
+// maxOffenderRecords caps the in-memory offender map. When the map grows
+// beyond this many entries we sweep expired records inline; this protects
+// against scanner-farm-style attacks that flood unique source IPs to
+// exhaust memory. The cap is generous — typical workloads sit well below
+// 1000 simultaneous offenders.
+const maxOffenderRecords = 50000
+
 // note records a violation for the given IP. Returns true when this
 // violation crosses the threshold and the IP has just been banned. The
 // (threshold, window) come from the active SafetyConfig — defaults are
 // applied when zero. An empty IP is a no-op (we cannot ban "unknown").
+//
+// Lock discipline: the offender map is mutated under t.mu only. The
+// allowlist check and the SQLite write run WITHOUT holding t.mu so the
+// content-scan hot path is not gated on disk I/O. The banned flag is
+// flipped only after a successful AddBlockedIP write, so a transient
+// SQLite error does not silently exempt the offender forever.
 func (t *autoBanTracker) note(ip string, cfg config.SafetyAutoBanConfig, now time.Time) (justBanned bool) {
 	if t == nil {
 		return false
@@ -128,33 +141,49 @@ func (t *autoBanTracker) note(ip string, cfg config.SafetyAutoBanConfig, now tim
 	window := time.Duration(windowSeconds) * time.Second
 
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	if len(t.offenders) > maxOffenderRecords {
+		t.sweepLocked(window, now)
+	}
 	rec, ok := t.offenders[ip]
 	if !ok || now.Sub(rec.firstSeen) > window {
-		rec = &offenderRecord{count: 1, firstSeen: now}
-		t.offenders[ip] = rec
+		t.offenders[ip] = &offenderRecord{count: 1, firstSeen: now}
+		t.mu.Unlock()
 		return false
 	}
 	if rec.banned {
+		t.mu.Unlock()
 		return false
 	}
 	rec.count++
-	if rec.count < threshold {
+	crossed := rec.count >= threshold
+	currentCount := rec.count
+	t.mu.Unlock()
+
+	if !crossed {
 		return false
 	}
-	if t.isAllowlistedLocked(ip) {
-		// Allowlisted IPs are exempt from auto-ban escalation. The
-		// violation still blocks the request (handled by the caller),
-		// but we do NOT add the IP to the blocked list.
+
+	// Allowlist check + SQLite write happen OUTSIDE t.mu so the content
+	// scan hot path does not block on disk I/O.
+	if t.isAllowlisted(ip) {
 		return false
 	}
-	rec.banned = true
 	if t.safetyIPs != nil {
 		if err := t.safetyIPs.AddBlockedIP(ip); err != nil {
 			config.Logger.Warn("[request_guard] auto-ban write failed", "ip", ip, "error", err)
 			return false
 		}
 	}
+
+	// Re-acquire mutex to flip rec.banned only AFTER a successful write.
+	// If the record was evicted while we were running the disk write, the
+	// next violation will simply re-trip the threshold — no harm done.
+	t.mu.Lock()
+	if rec, ok := t.offenders[ip]; ok {
+		rec.banned = true
+	}
+	t.mu.Unlock()
+
 	// Bust the policy cache so the next request rebuilds the blocked-ip
 	// matcher set with the freshly-added entry.
 	if t.policies != nil {
@@ -163,17 +192,18 @@ func (t *autoBanTracker) note(ip string, cfg config.SafetyAutoBanConfig, now tim
 		t.policies.mu.Unlock()
 	}
 	config.Logger.Warn("[request_guard] auto-banned IP after repeated violations",
-		"ip", ip, "count", rec.count, "threshold", threshold, "window_seconds", windowSeconds)
+		"ip", ip, "count", currentCount, "threshold", threshold, "window_seconds", windowSeconds)
 	return true
 }
 
-// isAllowlistedLocked returns true when the IP appears (verbatim or via a
-// CIDR match) in safety_ips.allowed_ips. Caller must hold t.mu (so the
-// tracker's internal state is consistent with the read). The allowlist is
-// queried fresh from SQLite each time — auto-ban is rare enough that the
-// per-trip read cost is negligible, and freshness is more important than
-// caching here (admin-side allowlist edits should take effect immediately).
-func (t *autoBanTracker) isAllowlistedLocked(ip string) bool {
+// isAllowlisted returns true when the IP appears (verbatim or via a CIDR
+// match) in safety_ips.allowed_ips. Runs WITHOUT holding t.mu — querying
+// SQLite under the tracker mutex would inject DB latency into every
+// content-block decision and create a fragile lock-ordering dependency.
+// Freshness wins over caching here: admin-side allowlist edits take
+// effect immediately, and auto-ban escalation is rare enough that the
+// per-trip read cost is negligible.
+func (t *autoBanTracker) isAllowlisted(ip string) bool {
 	if t == nil || t.safetyIPs == nil {
 		return false
 	}
@@ -200,14 +230,14 @@ func (t *autoBanTracker) isAllowlistedLocked(ip string) bool {
 	return false
 }
 
-// sweep drops offender records older than the window so the map does not
-// grow unbounded. Caller must NOT hold the mutex.
-func (t *autoBanTracker) sweep(window time.Duration, now time.Time) {
+// sweepLocked drops offender records older than the window so the map
+// does not grow unbounded. Caller MUST hold t.mu. Banned records are
+// preserved (their persistent ban already lives in safety_ips.blocked_ips
+// — keeping them here is just bookkeeping for log dedup).
+func (t *autoBanTracker) sweepLocked(window time.Duration, now time.Time) {
 	if t == nil {
 		return
 	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
 	for ip, rec := range t.offenders {
 		if rec.banned {
 			continue

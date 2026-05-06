@@ -338,13 +338,44 @@ func (s *IPsStore) init() error {
 	return nil
 }
 
+// ipsListQuery whitelists the (table, column) pairs that may be queried as
+// a list. SQL identifier interpolation via fmt.Sprintf is forbidden under
+// IGES red-line rules even when current callers all pass package-level
+// constants — we route every query through a static-string switch so the
+// pattern is safe-by-construction even if a future caller passes a
+// user-influenced string.
+func ipsListQuery(table, col string) (string, error) {
+	switch table {
+	case ipsTableBlocked:
+		if col != "raw" {
+			return "", fmt.Errorf("invalid column %q for table %q", col, table)
+		}
+		return `SELECT raw FROM blocked_ips ORDER BY raw`, nil
+	case ipsTableAllowed:
+		if col != "raw" {
+			return "", fmt.Errorf("invalid column %q for table %q", col, table)
+		}
+		return `SELECT raw FROM allowed_ips ORDER BY raw`, nil
+	case ipsTableConvBlock:
+		if col != "id" {
+			return "", fmt.Errorf("invalid column %q for table %q", col, table)
+		}
+		return `SELECT id FROM blocked_conversation_ids ORDER BY id`, nil
+	}
+	return "", fmt.Errorf("unknown safety ips table %q", table)
+}
+
 func (s *IPsStore) listTable(table, col string) ([]string, error) {
 	if s == nil || s.db == nil {
 		return nil, errors.New("safety ips store is nil")
 	}
+	query, err := ipsListQuery(table, col)
+	if err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(fmt.Sprintf(`SELECT %s FROM %s ORDER BY %s`, col, table, col))
+	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("list %s: %w", table, err)
 	}
@@ -375,9 +406,40 @@ func (s *IPsStore) BlockedConversationIDs() ([]string, error) {
 	return s.listTable(ipsTableConvBlock, "id")
 }
 
+// ipsMutationStatements returns the static DELETE / INSERT statements for
+// each accepted (table, column) pair. Same red-line discipline as
+// ipsListQuery: no SQL identifier interpolation.
+func ipsMutationStatements(table, col string) (deleteSQL, insertSQL string, err error) {
+	switch table {
+	case ipsTableBlocked:
+		if col != "raw" {
+			return "", "", fmt.Errorf("invalid column %q for table %q", col, table)
+		}
+		return `DELETE FROM blocked_ips`,
+			`INSERT OR IGNORE INTO blocked_ips(raw, created_at) VALUES(?, ?)`, nil
+	case ipsTableAllowed:
+		if col != "raw" {
+			return "", "", fmt.Errorf("invalid column %q for table %q", col, table)
+		}
+		return `DELETE FROM allowed_ips`,
+			`INSERT OR IGNORE INTO allowed_ips(raw, created_at) VALUES(?, ?)`, nil
+	case ipsTableConvBlock:
+		if col != "id" {
+			return "", "", fmt.Errorf("invalid column %q for table %q", col, table)
+		}
+		return `DELETE FROM blocked_conversation_ids`,
+			`INSERT OR IGNORE INTO blocked_conversation_ids(id, created_at) VALUES(?, ?)`, nil
+	}
+	return "", "", fmt.Errorf("unknown safety ips table %q", table)
+}
+
 func (s *IPsStore) replaceTable(table, col string, values []string) error {
 	if s == nil || s.db == nil {
 		return errors.New("safety ips store is nil")
+	}
+	deleteSQL, insertSQL, err := ipsMutationStatements(table, col)
+	if err != nil {
+		return err
 	}
 	clean := make([]string, 0, len(values))
 	seen := map[string]struct{}{}
@@ -399,10 +461,10 @@ func (s *IPsStore) replaceTable(table, col string, values []string) error {
 		return fmt.Errorf("begin %s replace: %w", table, err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.Exec(fmt.Sprintf(`DELETE FROM %s`, table)); err != nil {
+	if _, err := tx.Exec(deleteSQL); err != nil {
 		return fmt.Errorf("clear %s: %w", table, err)
 	}
-	stmt, err := tx.Prepare(fmt.Sprintf(`INSERT OR IGNORE INTO %s(%s, created_at) VALUES(?, ?)`, table, col))
+	stmt, err := tx.Prepare(insertSQL)
 	if err != nil {
 		return fmt.Errorf("prepare %s insert: %w", table, err)
 	}
@@ -451,10 +513,13 @@ func (s *IPsStore) appendOne(table, col, value string) error {
 	if v == "" {
 		return nil
 	}
+	_, insertSQL, err := ipsMutationStatements(table, col)
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	stmt := fmt.Sprintf(`INSERT OR IGNORE INTO %s(%s, created_at) VALUES(?, ?)`, table, col)
-	if _, err := s.db.Exec(stmt, v, time.Now().UnixMilli()); err != nil {
+	if _, err := s.db.Exec(insertSQL, v, time.Now().UnixMilli()); err != nil {
 		return fmt.Errorf("append into %s: %w", table, err)
 	}
 	return nil
