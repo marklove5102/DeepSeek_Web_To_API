@@ -64,10 +64,24 @@ type Cache struct {
 	memoryHits     int64
 	diskHits       int64
 	uncacheable    map[string]int64
+	pathStats      map[string]*pathStat
 	items          map[string]memoryEntry
 	lastDiskSweep  time.Time
 	onHit          HitFunc
 	semanticKey    bool
+}
+
+// pathStat aggregates lifecycle counters for a single canonical request
+// path. Per-path breakdown is what makes "why did the hit rate drop"
+// answerable: embeddings vs. chat completions are different workloads with
+// different ceilings, and aggregate stats hide which path is the bottleneck.
+type pathStat struct {
+	Hits        int64
+	Misses      int64
+	Stores      int64
+	MemoryHits  int64
+	DiskHits    int64
+	Uncacheable map[string]int64
 }
 
 type Entry struct {
@@ -103,6 +117,7 @@ func New(opts Options) *Cache {
 		memoryMaxBytes: opts.MemoryMaxBytes,
 		diskMaxBytes:   opts.DiskMaxBytes,
 		uncacheable:    map[string]int64{},
+		pathStats:      map[string]*pathStat{},
 		items:          map[string]memoryEntry{},
 		onHit:          opts.OnHit,
 		semanticKey:    opts.SemanticKey,
@@ -165,6 +180,9 @@ func (c *Cache) ApplyOptions(opts Options) {
 	c.items = map[string]memoryEntry{}
 	c.memoryBytes = 0
 	c.lastDiskSweep = time.Time{}
+	if c.pathStats == nil {
+		c.pathStats = map[string]*pathStat{}
+	}
 }
 
 func (c *Cache) Middleware(resolver CallerResolver) func(http.Handler) http.Handler {
@@ -202,19 +220,26 @@ func (c *Cache) Wrap(resolver CallerResolver, next http.Handler) http.Handler {
 		}
 		r.Body = io.NopCloser(bytes.NewReader(rawBody))
 
+		policy := pathPolicyFor(canonicalRequestPath(r.URL.Path))
+
 		owner := ""
 		if resolver != nil {
 			if a, authErr := resolver.DetermineCaller(r); authErr == nil && a != nil {
 				owner = strings.TrimSpace(a.CallerID)
 			}
 		}
-		if owner == "" {
+		// For per-caller paths (LLM completions) we still require a resolved
+		// caller — leaking a sampled response across tenants is a privacy
+		// boundary. For shared paths (embeddings, count_tokens) the entry is
+		// a deterministic function of the body alone, so an unresolved
+		// caller is fine.
+		if !policy.SharedAcrossCallers && owner == "" {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		key := c.requestKey(r, owner, rawBody)
-		if entry, source, ok := c.Get(key); ok {
+		key := c.requestKeyWithPolicy(r, owner, rawBody, policy)
+		if entry, source, ok := c.getWithPolicy(key, policy); ok {
 			if c.onHit != nil {
 				c.onHit(r, cloneEntry(entry), source)
 			}
@@ -226,9 +251,9 @@ func (c *Cache) Wrap(resolver CallerResolver, next http.Handler) http.Handler {
 		cw := newCaptureResponseWriter(w, c.maxBody)
 		next.ServeHTTP(cw, r)
 		if entry, ok, reason := cw.cacheEntry(); ok {
-			c.Set(key, entry)
+			c.setWithPolicy(key, entry, policy)
 		} else {
-			c.recordUncacheable(reason)
+			c.recordUncacheable(policy.Path, reason)
 		}
 	})
 }
@@ -255,17 +280,32 @@ func CacheableRequest(r *http.Request) bool {
 }
 
 func RequestKey(r *http.Request, owner string, body []byte) string {
-	return requestKey(r, owner, body, true)
+	policy := pathPolicy{}
+	if r != nil && r.URL != nil {
+		policy = pathPolicyFor(canonicalRequestPath(r.URL.Path))
+	}
+	return requestKey(r, owner, body, true, policy)
 }
 
 func (c *Cache) requestKey(r *http.Request, owner string, body []byte) string {
 	if c == nil {
 		return RequestKey(r, owner, body)
 	}
-	return requestKey(r, owner, body, c.semanticKey)
+	policy := pathPolicy{}
+	if r != nil && r.URL != nil {
+		policy = pathPolicyFor(canonicalRequestPath(r.URL.Path))
+	}
+	return requestKey(r, owner, body, c.semanticKey, policy)
 }
 
-func requestKey(r *http.Request, owner string, body []byte, semanticKey bool) string {
+func (c *Cache) requestKeyWithPolicy(r *http.Request, owner string, body []byte, policy pathPolicy) string {
+	if c == nil {
+		return requestKey(r, owner, body, true, policy)
+	}
+	return requestKey(r, owner, body, c.semanticKey, policy)
+}
+
+func requestKey(r *http.Request, owner string, body []byte, semanticKey bool, policy pathPolicy) string {
 	h := sha256.New()
 	body = canonicalRequestBodyForKey(r, body, semanticKey)
 	version := "v1"
@@ -273,7 +313,14 @@ func requestKey(r *http.Request, owner string, body []byte, semanticKey bool) st
 		version = "v2-semantic"
 	}
 	writeKeyPart(h, version)
-	writeKeyPart(h, strings.TrimSpace(owner))
+	// Shared paths intentionally omit the owner from the key so the same
+	// deterministic body produces the same key across API keys; per-caller
+	// paths keep the owner as a hard tenant boundary.
+	if policy.SharedAcrossCallers {
+		writeKeyPart(h, "shared")
+	} else {
+		writeKeyPart(h, strings.TrimSpace(owner))
+	}
 	if r != nil {
 		writeKeyPart(h, strings.ToUpper(strings.TrimSpace(r.Method)))
 		if r.URL != nil {
@@ -428,7 +475,14 @@ func normalizeSemanticString(raw string) string {
 	return strings.Join(fields, " ")
 }
 
+// Get is a backward-compatible wrapper that uses no path policy. It is kept
+// for external callers that look up entries without protocol-path context;
+// the in-package middleware always goes through getWithPolicy.
 func (c *Cache) Get(key string) (Entry, string, bool) {
+	return c.getWithPolicy(key, pathPolicy{})
+}
+
+func (c *Cache) getWithPolicy(key string, policy pathPolicy) (Entry, string, bool) {
 	key = normalizeKey(key)
 	if key == "" {
 		return Entry{}, "", false
@@ -439,7 +493,7 @@ func (c *Cache) Get(key string) (Entry, string, bool) {
 	if item, ok := c.items[key]; ok {
 		if now.Before(item.memoryExpiresAt) && now.Before(item.entry.DiskExpiresAt) {
 			entry := cloneEntry(item.entry)
-			c.recordHitLocked("memory")
+			c.recordHitLocked(policy.Path, "memory")
 			c.mu.Unlock()
 			return entry, "memory", true
 		}
@@ -449,31 +503,43 @@ func (c *Cache) Get(key string) (Entry, string, bool) {
 
 	entry, ok := c.getDisk(key, now)
 	if !ok {
-		c.recordMiss()
+		c.recordMiss(policy.Path)
 		return Entry{}, "", false
 	}
-	c.putMemory(key, entry, now)
-	c.recordHit("disk")
+	c.putMemoryWithPolicy(key, entry, now, policy)
+	c.recordHit(policy.Path, "disk")
 	return cloneEntry(entry), "disk", true
 }
 
+// Set is a backward-compatible wrapper that uses no path policy (the global
+// memory/disk TTLs apply). External callers that don't carry path context
+// can keep using this; the in-package middleware always routes through
+// setWithPolicy so per-path TTL overrides take effect.
 func (c *Cache) Set(key string, entry Entry) {
+	c.setWithPolicy(key, entry, pathPolicy{})
+}
+
+func (c *Cache) setWithPolicy(key string, entry Entry, policy pathPolicy) {
 	key = normalizeKey(key)
 	if key == "" || !entry.cacheable(c.maxBody) {
 		return
 	}
 	now := time.Now()
+	diskTTL := c.diskTTL
+	if policy.DiskTTL > 0 {
+		diskTTL = policy.DiskTTL
+	}
 	if entry.DiskExpiresAt.IsZero() || !entry.DiskExpiresAt.After(now) {
-		entry.DiskExpiresAt = now.Add(c.diskTTL)
+		entry.DiskExpiresAt = now.Add(diskTTL)
 	}
 	entry = cloneEntry(entry)
-	c.putMemory(key, entry, now)
+	c.putMemoryWithPolicy(key, entry, now, policy)
 	if err := c.putDisk(key, entry, now); err != nil {
 		config.Logger.Warn("[response_cache] disk write failed", "error", err)
 	} else {
 		c.enforceDiskLimit(now)
 	}
-	c.recordStore()
+	c.recordStore(policy.Path)
 	c.maybeSweepDisk(now)
 }
 
@@ -543,6 +609,10 @@ func canonicalRequestPath(path string) string {
 }
 
 func (c *Cache) putMemory(key string, entry Entry, now time.Time) {
+	c.putMemoryWithPolicy(key, entry, now, pathPolicy{})
+}
+
+func (c *Cache) putMemoryWithPolicy(key string, entry Entry, now time.Time, policy pathPolicy) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sweepMemoryLocked(now)
@@ -550,7 +620,11 @@ func (c *Cache) putMemory(key string, entry Entry, now time.Time) {
 	if c.memoryMaxBytes > 0 && size > c.memoryMaxBytes {
 		return
 	}
-	expiresAt := now.Add(c.memoryTTL)
+	memoryTTL := c.memoryTTL
+	if policy.MemoryTTL > 0 {
+		memoryTTL = policy.MemoryTTL
+	}
+	expiresAt := now.Add(memoryTTL)
 	if entry.DiskExpiresAt.Before(expiresAt) {
 		expiresAt = entry.DiskExpiresAt
 	}
@@ -599,13 +673,13 @@ func (c *Cache) enforceMemoryLimitLocked() {
 	}
 }
 
-func (c *Cache) recordHit(source string) {
+func (c *Cache) recordHit(path, source string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.recordHitLocked(source)
+	c.recordHitLocked(path, source)
 }
 
-func (c *Cache) recordHitLocked(source string) {
+func (c *Cache) recordHitLocked(path, source string) {
 	c.hits++
 	switch source {
 	case "memory":
@@ -613,21 +687,38 @@ func (c *Cache) recordHitLocked(source string) {
 	case "disk":
 		c.diskHits++
 	}
+	stat := c.pathStatLocked(path)
+	if stat == nil {
+		return
+	}
+	stat.Hits++
+	switch source {
+	case "memory":
+		stat.MemoryHits++
+	case "disk":
+		stat.DiskHits++
+	}
 }
 
-func (c *Cache) recordMiss() {
+func (c *Cache) recordMiss(path string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.misses++
+	if stat := c.pathStatLocked(path); stat != nil {
+		stat.Misses++
+	}
 }
 
-func (c *Cache) recordStore() {
+func (c *Cache) recordStore(path string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.stores++
+	if stat := c.pathStatLocked(path); stat != nil {
+		stat.Stores++
+	}
 }
 
-func (c *Cache) recordUncacheable(reason string) {
+func (c *Cache) recordUncacheable(path, reason string) {
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		reason = "unknown"
@@ -638,6 +729,33 @@ func (c *Cache) recordUncacheable(reason string) {
 		c.uncacheable = map[string]int64{}
 	}
 	c.uncacheable[reason]++
+	stat := c.pathStatLocked(path)
+	if stat == nil {
+		return
+	}
+	if stat.Uncacheable == nil {
+		stat.Uncacheable = map[string]int64{}
+	}
+	stat.Uncacheable[reason]++
+}
+
+// pathStatLocked returns the per-path counter bucket, lazily creating it on
+// first touch. Must be called with c.mu held. Returns nil for empty paths so
+// callers can opt out cleanly when path is not known.
+func (c *Cache) pathStatLocked(path string) *pathStat {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	if c.pathStats == nil {
+		c.pathStats = map[string]*pathStat{}
+	}
+	stat, ok := c.pathStats[path]
+	if !ok {
+		stat = &pathStat{Uncacheable: map[string]int64{}}
+		c.pathStats[path] = stat
+	}
+	return stat
 }
 
 func (c *Cache) putDisk(key string, entry Entry, now time.Time) error {
@@ -1197,7 +1315,47 @@ func (c *Cache) Stats() map[string]any {
 	for reason, count := range c.uncacheable {
 		out["uncacheable_"+reason] = count
 	}
+	if len(c.pathStats) > 0 {
+		paths := make(map[string]any, len(c.pathStats))
+		for path, stat := range c.pathStats {
+			pathLookups := stat.Hits + stat.Misses
+			pathCacheableLookups := stat.Hits + stat.Stores
+			uncacheableSum := int64(0)
+			for _, count := range stat.Uncacheable {
+				uncacheableSum += count
+			}
+			pathOut := map[string]any{
+				"lookups":            pathLookups,
+				"hits":               stat.Hits,
+				"misses":             stat.Misses,
+				"stores":             stat.Stores,
+				"memory_hits":        stat.MemoryHits,
+				"disk_hits":          stat.DiskHits,
+				"cacheable_lookups":  pathCacheableLookups,
+				"cacheable_misses":   stat.Stores,
+				"uncacheable_misses": uncacheableSum,
+				"hit_rate":           safeRate(stat.Hits, pathLookups),
+				"cacheable_hit_rate": safeRate(stat.Hits, pathCacheableLookups),
+				"shared":             pathPolicyFor(path).SharedAcrossCallers,
+			}
+			for reason, count := range stat.Uncacheable {
+				pathOut["uncacheable_"+reason] = count
+			}
+			paths[path] = pathOut
+		}
+		out["paths"] = paths
+	}
 	return out
+}
+
+// safeRate returns hits/total rounded to 4 decimals, or 0 when total is zero.
+func safeRate(hits, total int64) float64 {
+	if total <= 0 {
+		return 0
+	}
+	r := float64(hits) / float64(total)
+	// Round to 4 decimal places to avoid jitter in admin UI rendering.
+	return float64(int64(r*10000)) / 10000
 }
 
 func (c *Cache) String() string {

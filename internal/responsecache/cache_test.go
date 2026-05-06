@@ -27,6 +27,126 @@ func (s stubResolver) DetermineCaller(_ *http.Request) (*auth.RequestAuth, error
 	return &auth.RequestAuth{CallerID: s.caller}, nil
 }
 
+// TestEmbeddingsCacheSharesAcrossCallers verifies the policy from
+// docs/cache-research.md §4: embeddings are deterministic functions of input
+// text so cross-caller sharing is safe and prevents redundant upstream
+// calls. Two different API keys posting the same body must hit the same
+// cached response on the second request.
+func TestEmbeddingsCacheSharesAcrossCallers(t *testing.T) {
+	t.Parallel()
+
+	cache := New(Options{Dir: t.TempDir(), MemoryTTL: time.Minute, DiskTTL: time.Hour})
+	var upstream int32
+	makeHandler := func(callerID string) http.Handler {
+		return cache.Wrap(stubResolver{caller: callerID}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			atomic.AddInt32(&upstream, 1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3]}]}`))
+		}))
+	}
+
+	body := `{"model":"text-embedding-3-small","input":"hello world"}`
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(body))
+	req1.Header.Set("Content-Type", "application/json")
+	req1.Header.Set("Authorization", "Bearer key-alice")
+	rec1 := httptest.NewRecorder()
+	makeHandler("caller-alice").ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first status=%d body=%s", rec1.Code, rec1.Body.String())
+	}
+
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(body))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("Authorization", "Bearer key-bob")
+	rec2 := httptest.NewRecorder()
+	makeHandler("caller-bob").ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second status=%d body=%s", rec2.Code, rec2.Body.String())
+	}
+
+	if got := atomic.LoadInt32(&upstream); got != 1 {
+		t.Fatalf("expected upstream called once across two callers, got %d", got)
+	}
+	if got := rec2.Header().Get("X-DeepSeek-Web-To-API-Cache"); got != "memory" {
+		t.Fatalf("expected cross-caller memory hit, got %q", got)
+	}
+	stats := cache.Stats()
+	paths, ok := stats["paths"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected paths breakdown, got %T", stats["paths"])
+	}
+	emb, ok := paths["/v1/embeddings"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected /v1/embeddings entry, paths=%v", paths)
+	}
+	if got := emb["hits"]; got != int64(1) {
+		t.Fatalf("/v1/embeddings hits = %v, want 1", got)
+	}
+	if got := emb["stores"]; got != int64(1) {
+		t.Fatalf("/v1/embeddings stores = %v, want 1", got)
+	}
+	if got := emb["shared"]; got != true {
+		t.Fatalf("/v1/embeddings shared flag = %v, want true", got)
+	}
+}
+
+// TestChatCompletionsCacheStaysPerCaller verifies the inverse policy:
+// LLM completions are sampling-based and a hit returns a previously sampled
+// response. Crossing the caller boundary would expose one tenant's reply to
+// another, so the cache must remain partitioned. Same body, different
+// CallerID → independent cache entries.
+func TestChatCompletionsCacheStaysPerCaller(t *testing.T) {
+	t.Parallel()
+
+	cache := New(Options{Dir: t.TempDir(), MemoryTTL: time.Minute, DiskTTL: time.Hour})
+	var upstream int32
+	makeHandler := func(callerID string) http.Handler {
+		return cache.Wrap(stubResolver{caller: callerID}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			atomic.AddInt32(&upstream, 1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"hi"}}]}`))
+		}))
+	}
+
+	body := `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}`
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req1.Header.Set("Content-Type", "application/json")
+	req1.Header.Set("Authorization", "Bearer key-alice")
+	rec1 := httptest.NewRecorder()
+	makeHandler("caller-alice").ServeHTTP(rec1, req1)
+
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("Authorization", "Bearer key-bob")
+	rec2 := httptest.NewRecorder()
+	makeHandler("caller-bob").ServeHTTP(rec2, req2)
+
+	if got := atomic.LoadInt32(&upstream); got != 2 {
+		t.Fatalf("expected upstream called twice (one per caller), got %d", got)
+	}
+	if got := rec2.Header().Get("X-DeepSeek-Web-To-API-Cache"); got != "" {
+		t.Fatalf("expected no cross-caller hit on chat completions, got source=%q", got)
+	}
+	stats := cache.Stats()
+	paths, ok := stats["paths"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected paths breakdown, got %T", stats["paths"])
+	}
+	chat, ok := paths["/v1/chat/completions"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected /v1/chat/completions entry, paths=%v", paths)
+	}
+	if got := chat["hits"]; got != int64(0) {
+		t.Fatalf("/v1/chat/completions hits = %v, want 0 (per-caller boundary)", got)
+	}
+	if got := chat["stores"]; got != int64(2) {
+		t.Fatalf("/v1/chat/completions stores = %v, want 2", got)
+	}
+	if got := chat["shared"]; got != false {
+		t.Fatalf("/v1/chat/completions shared flag = %v, want false", got)
+	}
+}
+
 func TestMiddlewareCachesProtocolResponseInMemory(t *testing.T) {
 	t.Parallel()
 
