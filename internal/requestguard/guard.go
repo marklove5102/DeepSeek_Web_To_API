@@ -72,6 +72,152 @@ type policyCache struct {
 	cached      policy
 }
 
+// autoBanTracker counts safety/banned-word violations per client IP and
+// trips a permanent block when an IP repeats violations within the
+// sliding window. Tripped IPs are appended to the safety_ips blocked_ips
+// table via SafetyIPs.AddBlockedIP, so the next request from that IP is
+// stopped at the IP-blocked check before any content scan runs.
+type autoBanTracker struct {
+	mu        sync.Mutex
+	offenders map[string]*offenderRecord
+	safetyIPs *safetystore.IPsStore
+	policies  *policyCache
+}
+
+type offenderRecord struct {
+	count     int
+	firstSeen time.Time
+	banned    bool
+}
+
+func newAutoBanTracker(safetyIPs *safetystore.IPsStore, policies *policyCache) *autoBanTracker {
+	return &autoBanTracker{
+		offenders: map[string]*offenderRecord{},
+		safetyIPs: safetyIPs,
+		policies:  policies,
+	}
+}
+
+// note records a violation for the given IP. Returns true when this
+// violation crosses the threshold and the IP has just been banned. The
+// (threshold, window) come from the active SafetyConfig — defaults are
+// applied when zero. An empty IP is a no-op (we cannot ban "unknown").
+func (t *autoBanTracker) note(ip string, cfg config.SafetyAutoBanConfig, now time.Time) (justBanned bool) {
+	if t == nil {
+		return false
+	}
+	enabled := true
+	if cfg.Enabled != nil {
+		enabled = *cfg.Enabled
+	}
+	if !enabled {
+		return false
+	}
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		return false
+	}
+	threshold := cfg.Threshold
+	if threshold <= 0 {
+		threshold = 3
+	}
+	windowSeconds := cfg.WindowSeconds
+	if windowSeconds <= 0 {
+		windowSeconds = 600
+	}
+	window := time.Duration(windowSeconds) * time.Second
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	rec, ok := t.offenders[ip]
+	if !ok || now.Sub(rec.firstSeen) > window {
+		rec = &offenderRecord{count: 1, firstSeen: now}
+		t.offenders[ip] = rec
+		return false
+	}
+	if rec.banned {
+		return false
+	}
+	rec.count++
+	if rec.count < threshold {
+		return false
+	}
+	if t.isAllowlistedLocked(ip) {
+		// Allowlisted IPs are exempt from auto-ban escalation. The
+		// violation still blocks the request (handled by the caller),
+		// but we do NOT add the IP to the blocked list.
+		return false
+	}
+	rec.banned = true
+	if t.safetyIPs != nil {
+		if err := t.safetyIPs.AddBlockedIP(ip); err != nil {
+			config.Logger.Warn("[request_guard] auto-ban write failed", "ip", ip, "error", err)
+			return false
+		}
+	}
+	// Bust the policy cache so the next request rebuilds the blocked-ip
+	// matcher set with the freshly-added entry.
+	if t.policies != nil {
+		t.policies.mu.Lock()
+		t.policies.signature = ""
+		t.policies.mu.Unlock()
+	}
+	config.Logger.Warn("[request_guard] auto-banned IP after repeated violations",
+		"ip", ip, "count", rec.count, "threshold", threshold, "window_seconds", windowSeconds)
+	return true
+}
+
+// isAllowlistedLocked returns true when the IP appears (verbatim or via a
+// CIDR match) in safety_ips.allowed_ips. Caller must hold t.mu (so the
+// tracker's internal state is consistent with the read). The allowlist is
+// queried fresh from SQLite each time — auto-ban is rare enough that the
+// per-trip read cost is negligible, and freshness is more important than
+// caching here (admin-side allowlist edits should take effect immediately).
+func (t *autoBanTracker) isAllowlistedLocked(ip string) bool {
+	if t == nil || t.safetyIPs == nil {
+		return false
+	}
+	allowed, err := t.safetyIPs.AllowedIPs()
+	if err != nil || len(allowed) == 0 {
+		return false
+	}
+	parsed := net.ParseIP(strings.TrimSpace(ip))
+	if parsed == nil {
+		return false
+	}
+	for _, raw := range allowed {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if literal := net.ParseIP(raw); literal != nil && literal.Equal(parsed) {
+			return true
+		}
+		if _, cidr, err := net.ParseCIDR(raw); err == nil && cidr.Contains(parsed) {
+			return true
+		}
+	}
+	return false
+}
+
+// sweep drops offender records older than the window so the map does not
+// grow unbounded. Caller must NOT hold the mutex.
+func (t *autoBanTracker) sweep(window time.Duration, now time.Time) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for ip, rec := range t.offenders {
+		if rec.banned {
+			continue
+		}
+		if now.Sub(rec.firstSeen) > window {
+			delete(t.offenders, ip)
+		}
+	}
+}
+
 var defaultJailbreakPatterns = []string{
 	"ignore previous instructions",
 	"disregard previous instructions",
@@ -93,6 +239,7 @@ var defaultJailbreakPatterns = []string{
 
 func Middleware(opts Options) func(http.Handler) http.Handler {
 	policies := &policyCache{store: opts.Store, safetyWords: opts.SafetyWords, safetyIPs: opts.SafetyIPs}
+	tracker := newAutoBanTracker(opts.SafetyIPs, policies)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			rawBody := []byte(nil)
@@ -113,6 +260,13 @@ func Middleware(opts Options) func(http.Handler) http.Handler {
 
 			p := policies.load()
 			if d := p.evaluate(r, rawBody, meta); d.blocked {
+				if shouldCountAutoBan(d.code) {
+					autoBanCfg := config.SafetyAutoBanConfig{}
+					if opts.Store != nil {
+						autoBanCfg = opts.Store.SafetyConfig().AutoBan
+					}
+					tracker.note(meta.ClientIP, autoBanCfg, time.Now())
+				}
 				recordBlockedHistory(opts.ChatHistory, rawBody, meta, d)
 				writeBlocked(w, p.blockMessage, d)
 				return
@@ -121,6 +275,19 @@ func Middleware(opts Options) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// shouldCountAutoBan returns true for decision codes that correspond to a
+// content-side violation an attacker can deliberately trigger (banned
+// keywords / banned regex / jailbreak attempts). IP-blocked / conversation
+// -blocked outcomes are not counted: those are already terminal and do
+// not need an auto-ban escalation.
+func shouldCountAutoBan(code string) bool {
+	switch code {
+	case "content_blocked", "content_regex_blocked", "jailbreak_blocked":
+		return true
+	}
+	return false
 }
 
 func FromContext(ctx context.Context) (requestmeta.Metadata, bool) {

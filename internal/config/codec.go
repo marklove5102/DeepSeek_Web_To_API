@@ -199,12 +199,18 @@ func (c Config) Clone() Config {
 			Enabled:                cloneBoolPtr(c.Safety.Enabled),
 			BlockMessage:           c.Safety.BlockMessage,
 			BlockedIPs:             slices.Clone(c.Safety.BlockedIPs),
+			AllowedIPs:             slices.Clone(c.Safety.AllowedIPs),
 			BlockedConversationIDs: slices.Clone(c.Safety.BlockedConversationIDs),
 			BannedContent:          slices.Clone(c.Safety.BannedContent),
 			BannedRegex:            slices.Clone(c.Safety.BannedRegex),
 			Jailbreak: JailbreakConfig{
 				Enabled:  cloneBoolPtr(c.Safety.Jailbreak.Enabled),
 				Patterns: slices.Clone(c.Safety.Jailbreak.Patterns),
+			},
+			AutoBan: SafetyAutoBanConfig{
+				Enabled:       cloneBoolPtr(c.Safety.AutoBan.Enabled),
+				Threshold:     c.Safety.AutoBan.Threshold,
+				WindowSeconds: c.Safety.AutoBan.WindowSeconds,
 			},
 		},
 		Runtime: c.Runtime,

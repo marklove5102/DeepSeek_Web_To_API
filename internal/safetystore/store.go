@@ -427,6 +427,39 @@ func (s *IPsStore) ReplaceAllowedIPs(values []string) error {
 	return s.replaceTable(ipsTableAllowed, "raw", values)
 }
 
+// AddBlockedIP appends a single IP / CIDR to the blocked_ips table without
+// disturbing the rest of the list. This is the incremental write path used
+// by the auto-ban tracker — the violation counter trips and the offending
+// IP is added in one mutation, leaving the rest of the table untouched. A
+// blank value is a no-op; an already-blocked value is a no-op (the unique
+// index on the column suppresses the duplicate insert).
+func (s *IPsStore) AddBlockedIP(value string) error {
+	return s.appendOne(ipsTableBlocked, "raw", value)
+}
+
+// AddAllowedIP is the symmetric helper for the allowlist. Reserved for
+// admin actions that promote an IP from observation to allow-list status.
+func (s *IPsStore) AddAllowedIP(value string) error {
+	return s.appendOne(ipsTableAllowed, "raw", value)
+}
+
+func (s *IPsStore) appendOne(table, col, value string) error {
+	if s == nil || s.db == nil {
+		return errors.New("safety ips store is nil")
+	}
+	v := strings.TrimSpace(value)
+	if v == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stmt := fmt.Sprintf(`INSERT OR IGNORE INTO %s(%s, created_at) VALUES(?, ?)`, table, col)
+	if _, err := s.db.Exec(stmt, v, time.Now().UnixMilli()); err != nil {
+		return fmt.Errorf("append into %s: %w", table, err)
+	}
+	return nil
+}
+
 func (s *IPsStore) ReplaceBlockedConversationIDs(values []string) error {
 	return s.replaceTable(ipsTableConvBlock, "id", values)
 }

@@ -23,11 +23,26 @@ function updateJailbreak(setForm, patch) {
     }))
 }
 
+function updateAutoBan(setForm, patch) {
+    setForm((prev) => ({
+        ...prev,
+        safety: {
+            ...prev.safety,
+            auto_ban: {
+                ...prev.safety?.auto_ban,
+                ...patch,
+            },
+        },
+    }))
+}
+
 export default function SafetyPolicySection({ t, form, setForm }) {
     const safety = form.safety || {}
     const jailbreak = safety.jailbreak || {}
+    const autoBan = safety.auto_ban || {}
     const enabled = Boolean(safety.enabled)
     const jailbreakEnabled = Boolean(jailbreak.enabled)
+    const autoBanEnabled = autoBan.enabled !== false
 
     return (
         <div className="bg-card border border-border rounded-xl p-5 space-y-4">
@@ -93,6 +108,17 @@ export default function SafetyPolicySection({ t, form, setForm }) {
                 </label>
 
                 <label className="text-sm space-y-2">
+                    <span className="text-muted-foreground">{t('settings.allowedIps')}</span>
+                    <textarea
+                        rows={5}
+                        value={safety.allowed_ips_text || ''}
+                        onChange={(e) => updateSafetyText(setForm, 'allowed_ips_text', e.target.value)}
+                        placeholder={t('settings.allowedIpsPlaceholder')}
+                        className="w-full bg-background border border-border rounded-lg px-3 py-2 resize-y min-h-32"
+                    />
+                </label>
+
+                <label className="text-sm space-y-2">
                     <span className="text-muted-foreground">{t('settings.blockedConversationIds')}</span>
                     <textarea
                         rows={5}
@@ -136,6 +162,45 @@ export default function SafetyPolicySection({ t, form, setForm }) {
                     />
                     <p className="text-xs text-muted-foreground">{t('settings.safetyPolicyHelp')}</p>
                 </label>
+
+                <div className="md:col-span-2 rounded-lg border border-border bg-background/60 p-4 space-y-3">
+                    <label className="flex items-start gap-3">
+                        <input
+                            type="checkbox"
+                            checked={autoBanEnabled}
+                            onChange={(e) => updateAutoBan(setForm, { enabled: e.target.checked })}
+                            className="mt-1 h-4 w-4 rounded border-border"
+                        />
+                        <div className="space-y-1">
+                            <span className="text-sm font-medium block">{t('settings.autoBanEnabled')}</span>
+                            <span className="text-xs text-muted-foreground block">{t('settings.autoBanEnabledDesc')}</span>
+                        </div>
+                    </label>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <label className="text-sm space-y-1">
+                            <span className="text-muted-foreground">{t('settings.autoBanThreshold')}</span>
+                            <input
+                                type="number"
+                                min={1}
+                                value={autoBan.threshold ?? 3}
+                                onChange={(e) => updateAutoBan(setForm, { threshold: Number(e.target.value) })}
+                                disabled={!autoBanEnabled}
+                                className="w-full bg-background border border-border rounded-lg px-3 py-2 disabled:opacity-50"
+                            />
+                        </label>
+                        <label className="text-sm space-y-1">
+                            <span className="text-muted-foreground">{t('settings.autoBanWindowSeconds')}</span>
+                            <input
+                                type="number"
+                                min={1}
+                                value={autoBan.window_seconds ?? 600}
+                                onChange={(e) => updateAutoBan(setForm, { window_seconds: Number(e.target.value) })}
+                                disabled={!autoBanEnabled}
+                                className="w-full bg-background border border-border rounded-lg px-3 py-2 disabled:opacity-50"
+                            />
+                        </label>
+                    </div>
+                </div>
             </div>
         </div>
     )

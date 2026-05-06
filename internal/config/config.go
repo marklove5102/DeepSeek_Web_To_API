@@ -196,18 +196,31 @@ type ResponseCacheConfig struct {
 }
 
 type SafetyConfig struct {
-	Enabled                *bool           `json:"enabled,omitempty"`
-	BlockMessage           string          `json:"block_message,omitempty"`
-	BlockedIPs             []string        `json:"blocked_ips,omitempty"`
-	BlockedConversationIDs []string        `json:"blocked_conversation_ids,omitempty"`
-	BannedContent          []string        `json:"banned_content,omitempty"`
-	BannedRegex            []string        `json:"banned_regex,omitempty"`
-	Jailbreak              JailbreakConfig `json:"jailbreak,omitempty"`
+	Enabled                *bool                `json:"enabled,omitempty"`
+	BlockMessage           string               `json:"block_message,omitempty"`
+	BlockedIPs             []string             `json:"blocked_ips,omitempty"`
+	AllowedIPs             []string             `json:"allowed_ips,omitempty"`
+	BlockedConversationIDs []string             `json:"blocked_conversation_ids,omitempty"`
+	BannedContent          []string             `json:"banned_content,omitempty"`
+	BannedRegex            []string             `json:"banned_regex,omitempty"`
+	Jailbreak              JailbreakConfig      `json:"jailbreak,omitempty"`
+	AutoBan                SafetyAutoBanConfig  `json:"auto_ban,omitempty"`
 }
 
 type JailbreakConfig struct {
 	Enabled  *bool    `json:"enabled,omitempty"`
 	Patterns []string `json:"patterns,omitempty"`
+}
+
+// SafetyAutoBanConfig governs automatic IP blacklisting based on repeated
+// safety / banned-word violations. When violation_count for an IP reaches
+// Threshold within WindowSeconds, the IP is appended to the safety_ips
+// blocked_ips table. Defaults: enabled when safety.enabled, threshold 3,
+// window 600s.
+type SafetyAutoBanConfig struct {
+	Enabled       *bool `json:"enabled,omitempty"`
+	Threshold     int   `json:"threshold,omitempty"`
+	WindowSeconds int   `json:"window_seconds,omitempty"`
 }
 
 type RuntimeConfig struct {

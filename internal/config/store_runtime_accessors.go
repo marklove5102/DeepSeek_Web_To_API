@@ -269,12 +269,18 @@ func (s *Store) SafetyConfig() SafetyConfig {
 		Enabled:                cloneBoolPtr(cfg.Enabled),
 		BlockMessage:           cfg.BlockMessage,
 		BlockedIPs:             append([]string(nil), cfg.BlockedIPs...),
+		AllowedIPs:             append([]string(nil), cfg.AllowedIPs...),
 		BlockedConversationIDs: append([]string(nil), cfg.BlockedConversationIDs...),
 		BannedContent:          append([]string(nil), cfg.BannedContent...),
 		BannedRegex:            append([]string(nil), cfg.BannedRegex...),
 		Jailbreak: JailbreakConfig{
 			Enabled:  cloneBoolPtr(cfg.Jailbreak.Enabled),
 			Patterns: append([]string(nil), cfg.Jailbreak.Patterns...),
+		},
+		AutoBan: SafetyAutoBanConfig{
+			Enabled:       cloneBoolPtr(cfg.AutoBan.Enabled),
+			Threshold:     cfg.AutoBan.Threshold,
+			WindowSeconds: cfg.AutoBan.WindowSeconds,
 		},
 	}
 }

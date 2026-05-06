@@ -148,6 +148,9 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 				if err := h.SafetyIPs.ReplaceBlockedIPs(safetyCfg.BlockedIPs); err != nil {
 					mirrorWarn("safety_ips.blocked_ips", err)
 				}
+				if err := h.SafetyIPs.ReplaceAllowedIPs(safetyCfg.AllowedIPs); err != nil {
+					mirrorWarn("safety_ips.allowed_ips", err)
+				}
 				if err := h.SafetyIPs.ReplaceBlockedConversationIDs(safetyCfg.BlockedConversationIDs); err != nil {
 					mirrorWarn("safety_ips.blocked_conversation_ids", err)
 				}

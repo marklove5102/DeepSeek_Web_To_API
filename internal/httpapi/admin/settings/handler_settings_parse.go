@@ -267,6 +267,7 @@ func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *confi
 			cfg.BlockMessage = strings.TrimSpace(fmt.Sprintf("%v", v))
 		}
 		cfg.BlockedIPs = stringSliceFrom(raw["blocked_ips"])
+		cfg.AllowedIPs = stringSliceFrom(raw["allowed_ips"])
 		cfg.BlockedConversationIDs = stringSliceFrom(raw["blocked_conversation_ids"])
 		cfg.BannedContent = stringSliceFrom(raw["banned_content"])
 		cfg.BannedRegex = stringSliceFrom(raw["banned_regex"])
@@ -276,6 +277,18 @@ func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *confi
 				cfg.Jailbreak.Enabled = &b
 			}
 			cfg.Jailbreak.Patterns = stringSliceFrom(jailRaw["patterns"])
+		}
+		if autoRaw, ok := raw["auto_ban"].(map[string]any); ok {
+			if v, exists := autoRaw["enabled"]; exists {
+				b := boolFrom(v)
+				cfg.AutoBan.Enabled = &b
+			}
+			if v, exists := autoRaw["threshold"]; exists {
+				cfg.AutoBan.Threshold = intFrom(v)
+			}
+			if v, exists := autoRaw["window_seconds"]; exists {
+				cfg.AutoBan.WindowSeconds = intFrom(v)
+			}
 		}
 		if err := config.ValidateSafetyConfig(*cfg); err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
