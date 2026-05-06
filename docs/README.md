@@ -22,13 +22,16 @@
 
 本目录是 DeepSeek_Web_To_API 的当前文档入口，内容以现有 Go 后端、React 管理台、SQLite 历史记录、gzip 响应缓存和多协议兼容实现为准。旧仓库来源、旧部署平台和不再存在的启动文件不再作为文档依据。
 
+**v1.0.3 主要新增**：CDATA 管道变体兼容（工具调用参数乱码修复）、Thinking-Injection 工具链纪律与 MCP 规范、缓存路径分桶策略 + embeddings/count_tokens 跨 caller 共享、滑动窗口 TTL + 单飞 dedup + 会话级粘性、重复违规自动拉黑 + IP 白名单 WebUI 修复、CNB CI PR Docker 构建检查。
+
 推荐阅读顺序：
 
 - 新用户先看 [根目录 README](file://README.MD) 和 [API 文档](file://API.md)。
-- 运维部署看 [配置说明](file://docs/configuration.md)、[部署运维](file://docs/deployment.md)、[安全说明](file://docs/security.md)、[存储与缓存](file://docs/storage-cache.md)（含 5 套独立 SQLite 与缓存 TTL 默认值）。
+- 运维部署看 [配置说明](file://docs/configuration.md)、[部署运维](file://docs/deployment.md)、[安全说明](file://docs/security.md)、[存储与缓存](file://docs/storage-cache.md)（含 5 套独立 SQLite、缓存 TTL 默认值及 v1.0.3 缓存机制重构）。
 - 开发者看 [项目总览](file://docs/Project%20Overview/Project%20Overview.md)、[架构设计](file://docs/Architecture%20Design/Architecture%20Design.md)、[API 兼容系统](file://docs/API%20Compatibility%20System/API%20Compatibility%20System.md)。
 - 调试客户端（Claude Code、Codex CLI、OpenCode、Cherry Studio、OpenClaw 等）兼容性时先看 [client-compat 总索引](file://docs/client-compat/README.md)，再按客户端定位到对应专题报告（`docs/client-compat/<client>.md`）。
-- 协议层细节看 [Prompt 兼容流程](file://docs/prompt-compatibility.md) 和 [工具调用语义](file://docs/toolcall-semantics.md)。
+- 协议层细节看 [Prompt 兼容流程](file://docs/prompt-compatibility.md)（含 v1.0.3 工具链纪律）和 [工具调用语义](file://docs/toolcall-semantics.md)（含 v1.0.3 CDATA 管道变体兼容）。
+- 缓存设计依据看 [cache-research.md](file://docs/cache-research.md)（v1.0.3 路径分桶策略的调研基础）。
 
 **章节来源**
 - [README.MD](file://README.MD)
@@ -165,8 +168,9 @@ DS --> UPSTREAM
 | [Admin WebUI System](file://docs/Admin%20WebUI%20System/Admin%20WebUI%20System.md) | 管理台与 Admin API |
 | [Runtime Operations](file://docs/Runtime%20Operations/Runtime%20Operations.md) | 运维指标、日志、故障处理 |
 | [Testing and Delivery](file://docs/Testing%20and%20Delivery/Testing%20and%20Delivery.md) | 测试脚本、CI 和发布产物 |
-| [prompt-compatibility.md](file://docs/prompt-compatibility.md) | API 消息到网页纯文本上下文的兼容流程（含 v1.0.9 inline file upload、v1.0.5 MCP 展开） |
-| [toolcall-semantics.md](file://docs/toolcall-semantics.md) | 工具调用解析、修复和流式输出语义（含 v1.0.7 早结束 finalize、token leak 清理） |
+| [prompt-compatibility.md](file://docs/prompt-compatibility.md) | API 消息到网页纯文本上下文的兼容流程（含 v1.0.3 thinking-injection 工具链纪律、v1.0.9 inline file upload、v1.0.5 MCP 展开） |
+| [toolcall-semantics.md](file://docs/toolcall-semantics.md) | 工具调用解析、修复和流式输出语义（含 v1.0.3 CDATA 管道变体兼容、v1.0.7 早结束 finalize、token leak 清理） |
+| [cache-research.md](file://docs/cache-research.md) | 响应缓存命中率调研结论（v1.0.3 路径分桶策略的设计依据） |
 | [client-compat/](file://docs/client-compat/README.md) | 客户端兼容性专题报告：Codex / OpenCode / OpenClaw / Cherry Studio / Claude Code v2.x |
 
 **章节来源**

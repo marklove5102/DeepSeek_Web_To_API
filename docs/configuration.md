@@ -169,6 +169,17 @@ STORE --> SAVE
 | `server.http_total_timeout_seconds` | `7200` | **v1.0.6** | 替代之前硬编码 120s；Pro 模型长流式必备 |
 | `server.remote_file_upload_enabled` | `false` | **v1.0.9** | 关掉时附件 inline 文本注入；打开时回退到调用上游 `upload_file`（受账号速率限制） |
 
+### 安全自动拉黑（v1.0.3 新增）
+
+| 配置 | 默认 | 备注 |
+| --- | --- | --- |
+| `safety.auto_ban.enabled` | `true`（当 `safety.enabled=true`） | 是否开启重复违规自动拉黑 |
+| `safety.auto_ban.threshold` | `3` | 滑动窗口内累计触发次数阈值 |
+| `safety.auto_ban.window_seconds` | `600` | 滑动窗口时长（秒，默认 10 分钟） |
+| `safety.allowed_ips` | `[]` | IP 白名单；命中白名单的 IP 触发违规仍被拦截但不被自动拉黑 |
+
+命中阈值的 IP 写入 `safety_ips.blocked_ips`，下次同 IP 请求直接在 IP 检查阶段被拦截，不进入内容扫描。详见 [安全说明](file://docs/security.md) v1.0.3 增量节。
+
 ### `.env` CONFIG_JSON 形态（v1.0.11 起统一）
 
 `DEEPSEEK_WEB_TO_API_CONFIG_JSON` 推荐使用**单引号包裹的明文紧凑 JSON**：
