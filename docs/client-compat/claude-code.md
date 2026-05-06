@@ -517,6 +517,10 @@ anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,advanced-to
 | `mcp_servers` 参数被代理剥离 | 代理不知道如何处理 | ds2api 通过 `expandMCPServersAsTools()` 将其展开为虚拟工具条目 |
 | 每次请求都 miss 响应缓存 | `x-anthropic-billing-header` 中的 per-req 指纹每次不同 | 响应缓存的 key 不应包含该头部；用户可设置 `CLAUDE_CODE_ATTRIBUTION_HEADER=0` |
 | thinking 块在 tool_use 之后 | 代理重排了内容块顺序 | 严格保持 thinking → tool_use 顺序（ds2api `stream_runtime_emit.go` 中已通过 `closeThinkingBlock()` 保证） |
+| 工具或思考超过 120 秒后 Claude Code 中止 workflow，agent 在 deepseek 这边其实还在跑 | **这是 Claude Code 客户端自己的工具超时**，与 ds2api 服务端 7200s 超时无关 | 在启动 Claude Code 前设置环境变量：`BASH_DEFAULT_TIMEOUT_MS=600000`（默认工具超时 10 min）+ `BASH_MAX_TIMEOUT_MS=1800000`（上限 30 min）。这两个变量控制 Bash / 长时工具的客户端等待窗口，与 ds2api 的 `http_total_timeout_seconds` 是两条独立的超时链 |
+| 思考 / 工具超时后，**之后的请求完全没被发到 deepseek** | Claude Code abort 旧请求时关掉的是它本地的 fetch context，但 ds2api 端的会话亲和（session affinity）仍然把后续请求绑到原账号，账号此时正在等待上一次响应；新请求会排队到 `account_max_inflight` 上限触发 429 / 等待超时 | ds2api v1.0.3-cnb 已经在 `internal/responsecache/cache.go` 加了 `single-flight in-flight dedup` 缓解；进一步建议：调小 `account_max_inflight`（默认 2，可在 admin 控制台改成 1）让请求快速失败而不是无限排队，配合上面的 `BASH_*` 超时设置 |
+
+> **v1.0.2 → v1.0.3 升级强烈建议**：v1.0.2 的 `http_total_timeout_seconds` 默认仅 120 s，长时思考请求会在服务端硬切断；v1.0.3 起默认 7200 s（含 `StreamIdleTimeout` / `MaxKeepaliveCount` / 单飞 `inflightWaitTimeout` 全套对齐）。Pro 推理模型 + 长上下文场景几乎必须升级到 v1.0.3 才能避免服务端 120 s 限制叠加 Claude Code 客户端 120 s 限制造成的双重斩首。
 
 ---
 

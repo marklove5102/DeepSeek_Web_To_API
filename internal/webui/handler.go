@@ -69,6 +69,15 @@ func (h *Handler) serveFromDisk(w http.ResponseWriter, r *http.Request, staticDi
 			} else {
 				w.Header().Set("Cache-Control", "no-store, must-revalidate")
 			}
+			// Pin Content-Type by extension before delegating to
+			// http.ServeFile. On Windows, http.ServeFile consults
+			// the HKEY_CLASSES_ROOT registry for MIME mappings;
+			// third-party software is known to corrupt entries
+			// (e.g. .css → application/xml), which silently breaks
+			// the admin panel stylesheet. Setting Content-Type
+			// here makes ServeFile skip its own DetectContentType
+			// path. CJackHwang/ds2api 7870a61b.
+			setExplicitContentType(w, path)
 			http.ServeFile(w, r, full)
 			return
 		}
@@ -82,6 +91,42 @@ func (h *Handler) serveFromDisk(w http.ResponseWriter, r *http.Request, staticDi
 	}
 	w.Header().Set("Cache-Control", "no-store, must-revalidate")
 	http.ServeFile(w, r, index)
+}
+
+// setExplicitContentType sets the Content-Type response header based on
+// file extension. Hardcoded to bypass http.ServeFile's mime.TypeByExtension
+// fallback which on Windows reads HKEY_CLASSES_ROOT and is known to be
+// corruptible by third-party software (most commonly .css → application/xml,
+// which breaks the admin panel stylesheet). Returns silently for unknown
+// extensions, leaving ServeFile's DetectContentType path intact.
+func setExplicitContentType(w http.ResponseWriter, path string) {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".css":
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	case ".js", ".mjs":
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	case ".json":
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	case ".html", ".htm":
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	case ".svg":
+		w.Header().Set("Content-Type", "image/svg+xml")
+	case ".png":
+		w.Header().Set("Content-Type", "image/png")
+	case ".jpg", ".jpeg":
+		w.Header().Set("Content-Type", "image/jpeg")
+	case ".webp":
+		w.Header().Set("Content-Type", "image/webp")
+	case ".woff":
+		w.Header().Set("Content-Type", "font/woff")
+	case ".woff2":
+		w.Header().Set("Content-Type", "font/woff2")
+	case ".map":
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	case ".ico":
+		w.Header().Set("Content-Type", "image/x-icon")
+	}
 }
 
 func resolveAdminFilePath(staticDir, requestPath string) (string, error) {

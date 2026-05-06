@@ -2,8 +2,13 @@ import { Activity, ArrowDown, ArrowUp, CalendarDays, Cpu, Database, DollarSign, 
 import { useEffect, useMemo, useState } from 'react'
 import clsx from 'clsx'
 
-const REFRESH_MS = 2500
-const HISTORY_SAMPLE_LIMIT = 500
+// Overview dashboard polling cadence — adopted from CNB PR #15. The
+// previous 2.5s refresh + 500-entry chat-history sample created sustained
+// admin-API load (the dashboard renders 7 log lines + 28 chart bars, so
+// 50 samples is sufficient). 10s refresh is well within "live enough"
+// for an operator overview.
+const REFRESH_MS = 10_000
+const HISTORY_SAMPLE_LIMIT = 50
 const CHART_WIDTH = 1200
 const CHART_HEIGHT = 170
 const CHART_LEFT = 24

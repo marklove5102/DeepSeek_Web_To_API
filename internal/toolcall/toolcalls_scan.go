@@ -7,9 +7,14 @@ import "strings"
 // (e.g. "tool_calls" before "tool_call"). Chinese variants ("工具调用", "调用",
 // "参数") are emitted by some models (notably DeepSeek-v4-pro under high
 // reasoning effort) and must be canonicalized back to English so the rest of
-// the parser pipeline recognizes them.
+// the parser pipeline recognizes them. Hyphenated variants ("tool-calls",
+// "tool-call") are emitted by Cherry Studio and some upstream-derived
+// adapters that translate the DSML namespace separator from underscore to
+// hyphen — accepting them is upstream CJackHwang/ds2api 2f7cb473 +
+// 545ab080, rewritten on top of our canonicalize-first pipeline.
 var toolMarkupNames = []string{
-	"tool_calls", "tool_call",
+	"tool_calls", "tool-calls",
+	"tool_call", "tool-call",
 	"invoke", "parameter",
 	"工具调用", "调用", "参数",
 }
@@ -23,11 +28,12 @@ var toolMarkupTokenArtifacts = []string{
 	"\u2581", // lower one eighth block, often used as a tokenized-space marker
 }
 
-// canonicalToolMarkupName maps any recognized name (including Chinese / legacy
-// variants) to the canonical English form used by the downstream XML parser.
+// canonicalToolMarkupName maps any recognized name (including Chinese,
+// hyphenated, and legacy variants) to the canonical English form used by
+// the downstream XML parser.
 func canonicalToolMarkupName(name string) string {
 	switch name {
-	case "工具调用", "tool_call":
+	case "工具调用", "tool_call", "tool-calls", "tool-call":
 		return "tool_calls"
 	case "调用":
 		return "invoke"
@@ -268,12 +274,36 @@ func consumeToolMarkupNamePrefixOnce(lower, text string, idx int, allowTokenArti
 	if strings.HasPrefix(lower[idx:], "dsml") {
 		return idx + len("dsml"), true
 	}
+	// Accept '-' and '_' as DSML namespace separators so models that
+	// emit `<dsml-tool-calls>` or `<dsml_tool_calls>` (Cherry Studio +
+	// upstream-derived adapters) reach the canonical name matcher.
+	// Only consumed when followed by a recognized name prefix to avoid
+	// munging arbitrary content that happens to start with '-' / '_'.
+	if next, ok := consumeToolMarkupHyphenSeparator(lower, text, idx); ok {
+		return next, true
+	}
 	if allowTokenArtifacts {
 		if next, ok := consumeToolMarkupTokenArtifact(text, idx); ok {
 			return next, true
 		}
 	}
 	return idx, false
+}
+
+func consumeToolMarkupHyphenSeparator(lower, text string, idx int) (int, bool) {
+	if idx >= len(text) {
+		return idx, false
+	}
+	if text[idx] != '-' && text[idx] != '_' {
+		return idx, false
+	}
+	// Only treat as a separator when the immediately-following text looks
+	// like a recognized markup name. Without this guard we would consume
+	// arbitrary leading hyphens / underscores that belong to user content.
+	if !hasToolMarkupNamePrefix(lower[idx+1:]) {
+		return idx, false
+	}
+	return idx + 1, true
 }
 
 func consumeToolMarkupSpaceSeparator(text string, idx int) (int, bool) {

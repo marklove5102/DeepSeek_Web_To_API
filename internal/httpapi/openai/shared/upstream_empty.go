@@ -15,23 +15,30 @@ type EmptyRetryAccountSwitcher interface {
 	SwitchAccount(ctx context.Context, a *auth.RequestAuth) bool
 }
 
-func ShouldWriteUpstreamEmptyOutputError(text string) bool {
-	return text == ""
+// ShouldWriteUpstreamEmptyOutputError returns true ONLY when the upstream
+// produced neither visible text NOR reasoning content. A thinking-only
+// response — where the model emitted a reasoning trace but no visible
+// text — is no longer treated as "empty"; the reasoning IS content the
+// caller can render (DeepSeek Pro reasoning models, especially under
+// tool-augmented prompts, intermittently produce thinking-only frames
+// that historically were lost as 429 errors). Aligned with upstream
+// CJackHwang/ds2api a7522b41 + a299c7d1 but rewritten on top of our
+// local empty-retry runtime instead of taking the structural refactor.
+func ShouldWriteUpstreamEmptyOutputError(text, thinking string) bool {
+	return strings.TrimSpace(text) == "" && strings.TrimSpace(thinking) == ""
 }
 
 func UpstreamEmptyOutputDetail(contentFilter bool, text, thinking string) (int, string, string) {
 	_ = text
+	_ = thinking
 	if contentFilter {
 		return http.StatusBadRequest, "Upstream content filtered the response and returned no output.", "content_filter"
-	}
-	if thinking != "" {
-		return http.StatusTooManyRequests, "Upstream account hit a rate limit and returned reasoning without visible output.", "upstream_empty_output"
 	}
 	return http.StatusTooManyRequests, "Upstream account hit a rate limit and returned empty output.", "upstream_empty_output"
 }
 
 func WriteUpstreamEmptyOutputError(w http.ResponseWriter, text, thinking string, contentFilter bool) bool {
-	if !ShouldWriteUpstreamEmptyOutputError(text) {
+	if !ShouldWriteUpstreamEmptyOutputError(text, thinking) {
 		return false
 	}
 	status, message, code := UpstreamEmptyOutputDetail(contentFilter, text, thinking)

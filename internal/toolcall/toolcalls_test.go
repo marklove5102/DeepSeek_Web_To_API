@@ -91,6 +91,43 @@ func TestParseToolCallsRecoversFromMalformedCDATAClose(t *testing.T) {
 	}
 }
 
+// TestParseToolCallsToleratesHyphenatedDSMLTags covers Cherry Studio and
+// some upstream-derived adapters that emit `<dsml-tool-calls>` /
+// `<dsml-invoke>` / `<dsml-parameter>` (hyphen separator) instead of the
+// canonical pipe-prefixed `<|DSML|tool_calls>` form. Aligned with
+// CJackHwang/ds2api 2f7cb473 + 545ab080, rewritten on top of our local
+// scan pipeline.
+func TestParseToolCallsToleratesHyphenatedDSMLTags(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "hyphenated dsml tool_calls + invoke + parameter",
+			raw:  `<dsml-tool-calls><dsml-invoke name="Bash"><dsml-parameter name="command"><![CDATA[pwd]]></dsml-parameter></dsml-invoke></dsml-tool-calls>`,
+		},
+		{
+			name: "underscore-separated dsml prefix",
+			raw:  `<dsml_tool_calls><dsml_invoke name="Bash"><dsml_parameter name="command"><![CDATA[pwd]]></dsml_parameter></dsml_invoke></dsml_tool_calls>`,
+		},
+		{
+			name: "mixed hyphen + underscore",
+			raw:  `<dsml-tool_calls><dsml-invoke name="Bash"><dsml_parameter name="command"><![CDATA[pwd]]></dsml_parameter></dsml-invoke></dsml-tool_calls>`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := ParseToolCalls(tc.raw, []string{"Bash"})
+			if len(calls) != 1 {
+				t.Fatalf("expected 1 call, got %#v", calls)
+			}
+			if calls[0].Name != "Bash" || calls[0].Input["command"] != "pwd" {
+				t.Fatalf("unexpected parse: %#v", calls[0])
+			}
+		})
+	}
+}
+
 // TestParseToolCallsToleratesCDATAPipeOpenerVariant covers a real-world
 // DeepSeek emission where the model bleeds the surrounding "<|DSML|...|>"
 // pipe convention into the CDATA opener, producing "<![CDATA|VALUE]]>"

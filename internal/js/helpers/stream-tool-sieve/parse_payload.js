@@ -8,7 +8,16 @@ const CDATA_PIPE_VARIANT_PATTERN = /^<!\[CDATA[\|｜]([\s\S]*?)[\|｜]?]]>$/i;
 const CDATA_PIPE_OPEN_ASCII = '<![cdata|';
 const CDATA_PIPE_OPEN_WIDE = '<![cdata｜';
 const XML_ATTR_PATTERN = /\b([a-z0-9_:-]+)\s*=\s*("([^"]*)"|'([^']*)')/gi;
-const TOOL_MARKUP_NAMES = ['tool_calls', 'invoke', 'parameter'];
+// Recognized markup tag names. Hyphenated variants ('tool-calls',
+// 'tool-call') and the 'tool_call' singular form are accepted alongside
+// the canonical 'tool_calls' to cover Cherry Studio + upstream-derived
+// adapters that translate the DSML namespace separator to a hyphen.
+// Mirror of internal/toolcall/toolcalls_scan.go toolMarkupNames.
+const TOOL_MARKUP_NAMES = [
+  'tool_calls', 'tool-calls',
+  'tool_call', 'tool-call',
+  'invoke', 'parameter',
+];
 const TOOL_MARKUP_TOKEN_ARTIFACTS = ['\u200b', '\u200c', '\u200d', '\u2060', '\ufeff', '\u2581'];
 
 const {
@@ -146,9 +155,13 @@ function normalizeDSMLToolCallMarkup(text) {
     return { text: '', ok: true };
   }
   const styles = containsToolMarkupSyntaxOutsideIgnored(raw);
-  if (!styles.dsml) {
+  if (!styles.dsml && !styles.canonical) {
     return { text: raw, ok: true };
   }
+  // Always run the replacer when any tool-markup tag was detected. Even
+  // when only "canonical" tags were seen, hyphenated variants (e.g.
+  // <tool-calls>) need to be rewritten to underscore form so downstream
+  // findXmlElementBlocks(raw, 'tool_calls') matches them.
   return {
     text: replaceDSMLToolMarkupOutsideIgnored(raw),
     ok: true,
@@ -233,6 +246,21 @@ function containsToolMarkupSyntaxOutsideIgnored(text) {
   return styles;
 }
 
+// canonicalToolMarkupName maps any recognized variant (hyphenated form,
+// singular `tool_call`) back to the canonical name used by downstream
+// parsing (`tool_calls` / `invoke` / `parameter`). Mirrors the Go-side
+// canonicalToolMarkupName.
+function canonicalToolMarkupName(name) {
+  switch (name) {
+    case 'tool_call':
+    case 'tool-calls':
+    case 'tool-call':
+      return 'tool_calls';
+    default:
+      return name;
+  }
+}
+
 function replaceDSMLToolMarkupOutsideIgnored(text) {
   const raw = toStringSafe(text);
   if (!raw) {
@@ -253,8 +281,9 @@ function replaceDSMLToolMarkupOutsideIgnored(text) {
     }
     const tag = scanToolMarkupTagAt(raw, i);
     if (tag) {
-      if (tag.dsmlLike) {
-        out += `<${tag.closing ? '/' : ''}${tag.name}${raw.slice(tag.nameEnd, tag.end + 1)}`;
+      const canonicalName = canonicalToolMarkupName(tag.name);
+      if (tag.dsmlLike || canonicalName !== tag.name) {
+        out += `<${tag.closing ? '/' : ''}${canonicalName}${raw.slice(tag.nameEnd, tag.end + 1)}`;
         if (raw[tag.end] !== '>') {
           out += '>';
         }
@@ -620,6 +649,14 @@ function consumeToolMarkupNamePrefixOnce(raw, lower, idx, allowTokenArtifacts) {
   }
   if (lower.startsWith('dsml', idx)) {
     return { next: idx + 'dsml'.length, ok: true };
+  }
+  // Accept '-' / '_' as DSML namespace separators only when followed by
+  // a recognized markup name. Mirrors the Go-side
+  // consumeToolMarkupHyphenSeparator guard.
+  if (idx < raw.length && (raw[idx] === '-' || raw[idx] === '_')) {
+    if (hasToolMarkupNamePrefix(lower.slice(idx + 1))) {
+      return { next: idx + 1, ok: true };
+    }
   }
   if (allowTokenArtifacts) {
     for (const artifact of TOOL_MARKUP_TOKEN_ARTIFACTS) {

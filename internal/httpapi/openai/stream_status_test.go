@@ -452,10 +452,12 @@ func TestChatCompletionsStreamExposesReasoningWhenExplicitlyRequested(t *testing
 	}
 }
 
-func TestChatCompletionsNonStreamRetriesThinkingOnlyOutput(t *testing.T) {
+// TestChatCompletionsNonStreamAcceptsThinkingOnlyWithoutRetry — see
+// the responses counterpart for rationale. v1.0.3-cnb accepts a
+// thinking-only frame as success rather than firing a synthetic retry.
+func TestChatCompletionsNonStreamAcceptsThinkingOnlyWithoutRetry(t *testing.T) {
 	ds := &streamStatusDSSeqStub{resps: []*http.Response{
 		makeOpenAISSEHTTPResponse(`data: {"response_message_id":99,"p":"response/thinking_content","v":"plan"}`, "data: [DONE]"),
-		makeOpenAISSEHTTPResponse(`data: {"p":"response/content","v":"visible"}`, "data: [DONE]"),
 	}}
 	h := &openAITestSurface{
 		Store: mockOpenAIConfig{wideInput: true},
@@ -470,34 +472,27 @@ func TestChatCompletionsNonStreamRetriesThinkingOnlyOutput(t *testing.T) {
 	newOpenAITestRouter(h).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 after retry, got %d body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("expected 200 for thinking-only response, got %d body=%s", rec.Code, rec.Body.String())
 	}
-	if len(ds.payloads) != 2 {
-		t.Fatalf("expected one synthetic retry call, got %d", len(ds.payloads))
-	}
-	// Verify multi-turn chaining.
-	if parentID, ok := ds.payloads[1]["parent_message_id"].(int); !ok || parentID != 99 {
-		t.Fatalf("expected retry parent_message_id=99, got %#v", ds.payloads[1]["parent_message_id"])
+	if len(ds.payloads) != 1 {
+		t.Fatalf("expected exactly one upstream call (no retry), got %d", len(ds.payloads))
 	}
 	var out map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode response failed: %v body=%s", err, rec.Body.String())
 	}
-	choices, _ := out["choices"].([]any)
-	choice, _ := choices[0].(map[string]any)
-	message, _ := choice["message"].(map[string]any)
-	if asString(message["content"]) != "visible" {
-		t.Fatalf("expected retry visible content, got %#v", message)
-	}
-	if _, exists := message["reasoning_content"]; exists {
-		t.Fatalf("default chat response should not expose reasoning_content, got %#v", message)
+	if errObj, ok := out["error"]; ok && errObj != nil {
+		t.Fatalf("did not expect error envelope on thinking-only success, got %#v", out)
 	}
 }
 
 func TestChatCompletionsNonStreamSwitchesManagedAccountOnEmptyRetry(t *testing.T) {
+	// v1.0.3-cnb: see the responses counterpart for rationale. Use a
+	// genuinely-empty first frame (no thinking, no text) to exercise
+	// the retry + managed-account-switch path.
 	authStub := &streamStatusSwitchingAuthStub{}
 	ds := &streamStatusDSSeqStub{resps: []*http.Response{
-		makeOpenAISSEHTTPResponse(`data: {"response_message_id":101,"p":"response/thinking_content","v":"plan"}`, "data: [DONE]"),
+		makeOpenAISSEHTTPResponse(`data: {"response_message_id":101}`, "data: [DONE]"),
 		makeOpenAISSEHTTPResponse(`data: {"p":"response/content","v":"visible"}`, "data: [DONE]"),
 	}}
 	h := &openAITestSurface{
@@ -688,10 +683,17 @@ func TestResponsesStreamRetriesThinkingOnlyOutput(t *testing.T) {
 	}
 }
 
-func TestResponsesNonStreamRetriesThinkingOnlyOutput(t *testing.T) {
+// TestResponsesNonStreamAcceptsThinkingOnlyWithoutRetry pins the
+// v1.0.3-cnb contract: a thinking-only upstream response is NO longer
+// classified as empty — reasoning IS legitimate content. The previous
+// behaviour fired a synthetic retry against a Pro model that was
+// intentionally producing only reasoning, burning quota without
+// converging. Now we accept the first frame as 200 and surface the
+// reasoning entry directly. Genuinely-empty responses still retry (see
+// TestResponsesNonStreamSwitchesManagedAccountOnEmptyRetry below).
+func TestResponsesNonStreamAcceptsThinkingOnlyWithoutRetry(t *testing.T) {
 	ds := &streamStatusDSSeqStub{resps: []*http.Response{
 		makeOpenAISSEHTTPResponse(`data: {"response_message_id":88,"p":"response/thinking_content","v":"plan"}`, "data: [DONE]"),
-		makeOpenAISSEHTTPResponse(`data: {"p":"response/content","v":"visible"}`, "data: [DONE]"),
 	}}
 	h := &openAITestSurface{
 		Store: mockOpenAIConfig{wideInput: true},
@@ -706,25 +708,21 @@ func TestResponsesNonStreamRetriesThinkingOnlyOutput(t *testing.T) {
 	newOpenAITestRouter(h).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 after retry, got %d body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("expected 200 for thinking-only response, got %d body=%s", rec.Code, rec.Body.String())
 	}
-	if len(ds.payloads) != 2 {
-		t.Fatalf("expected one synthetic retry call, got %d", len(ds.payloads))
-	}
-	// Verify multi-turn chaining.
-	if parentID, ok := ds.payloads[1]["parent_message_id"].(int); !ok || parentID != 88 {
-		t.Fatalf("expected retry parent_message_id=88, got %#v", ds.payloads[1]["parent_message_id"])
+	if len(ds.payloads) != 1 {
+		t.Fatalf("expected exactly one upstream call (no retry), got %d", len(ds.payloads))
 	}
 	var out map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode response failed: %v body=%s", err, rec.Body.String())
 	}
-	if asString(out["output_text"]) != "visible" {
-		t.Fatalf("expected retry visible output_text, got %#v", out["output_text"])
+	if errObj, ok := out["error"]; ok && errObj != nil {
+		t.Fatalf("did not expect error envelope on thinking-only success, got %#v", out)
 	}
 	output, _ := out["output"].([]any)
 	if len(output) == 0 {
-		t.Fatalf("expected output items, got %#v", out)
+		t.Fatalf("expected output items carrying the reasoning, got %#v", out)
 	}
 	item, _ := output[0].(map[string]any)
 	content, _ := item["content"].([]any)
@@ -738,9 +736,15 @@ func TestResponsesNonStreamRetriesThinkingOnlyOutput(t *testing.T) {
 }
 
 func TestResponsesNonStreamSwitchesManagedAccountOnEmptyRetry(t *testing.T) {
+	// v1.0.3-cnb: thinking-only responses are NO LONGER classified as
+	// empty (reasoning IS content). To exercise the synthetic-retry +
+	// managed-account-switch path we feed a TRULY empty first frame
+	// (response_message_id only, no thinking, no text) and a visible
+	// second frame. The retry-on-empty contract is preserved for the
+	// genuinely-empty case; only thinking-only is now success-on-first.
 	authStub := &streamStatusSwitchingAuthStub{}
 	ds := &streamStatusDSSeqStub{resps: []*http.Response{
-		makeOpenAISSEHTTPResponse(`data: {"response_message_id":202,"p":"response/thinking_content","v":"plan"}`, "data: [DONE]"),
+		makeOpenAISSEHTTPResponse(`data: {"response_message_id":202}`, "data: [DONE]"),
 		makeOpenAISSEHTTPResponse(`data: {"p":"response/content","v":"visible"}`, "data: [DONE]"),
 	}}
 	h := &openAITestSurface{

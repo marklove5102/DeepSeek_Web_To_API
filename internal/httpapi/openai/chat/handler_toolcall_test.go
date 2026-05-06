@@ -124,7 +124,14 @@ func TestHandleNonStreamReturnsContentFilterErrorWhenUpstreamFilteredWithoutOutp
 	}
 }
 
-func TestHandleNonStreamReturns429WhenUpstreamHasOnlyThinking(t *testing.T) {
+// TestHandleNonStreamAcceptsThinkingOnlyAs200 pins the v1.0.3-cnb
+// contract: a response with reasoning content but no visible text is
+// NOT empty — it carries the model's reasoning. Returning 429 in that
+// case (the previous behaviour) lost legitimate output. Now the server
+// returns 200 with the reasoning surfaced via the standard chat
+// completion body shape (visible to clients that opt in to reasoning,
+// hidden otherwise — same as any thinking-bearing response).
+func TestHandleNonStreamAcceptsThinkingOnlyAs200(t *testing.T) {
 	h := &Handler{}
 	resp := makeSSEHTTPResponse(
 		`data: {"p":"response/thinking_content","v":"Only thinking"}`,
@@ -133,13 +140,16 @@ func TestHandleNonStreamReturns429WhenUpstreamHasOnlyThinking(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	h.handleNonStream(rec, resp, "cid-thinking-only", "deepseek-v4-pro", "prompt", 0, true, false, false, nil, nil, nil)
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("expected status 429 for thinking-only upstream output, got %d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for thinking-only upstream output, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	out := decodeJSONBody(t, rec.Body.String())
-	errObj, _ := out["error"].(map[string]any)
-	if asString(errObj["code"]) != "upstream_empty_output" {
-		t.Fatalf("expected code=upstream_empty_output, got %#v", out)
+	if errObj, ok := out["error"]; ok && errObj != nil {
+		t.Fatalf("did not expect error envelope on thinking-only success, got %#v", out)
+	}
+	choices, _ := out["choices"].([]any)
+	if len(choices) == 0 {
+		t.Fatalf("expected choices, got %#v", out)
 	}
 }
 
