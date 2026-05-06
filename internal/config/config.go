@@ -196,15 +196,15 @@ type ResponseCacheConfig struct {
 }
 
 type SafetyConfig struct {
-	Enabled                *bool                `json:"enabled,omitempty"`
-	BlockMessage           string               `json:"block_message,omitempty"`
-	BlockedIPs             []string             `json:"blocked_ips,omitempty"`
-	AllowedIPs             []string             `json:"allowed_ips,omitempty"`
-	BlockedConversationIDs []string             `json:"blocked_conversation_ids,omitempty"`
-	BannedContent          []string             `json:"banned_content,omitempty"`
-	BannedRegex            []string             `json:"banned_regex,omitempty"`
-	Jailbreak              JailbreakConfig      `json:"jailbreak,omitempty"`
-	AutoBan                SafetyAutoBanConfig  `json:"auto_ban,omitempty"`
+	Enabled                *bool               `json:"enabled,omitempty"`
+	BlockMessage           string              `json:"block_message,omitempty"`
+	BlockedIPs             []string            `json:"blocked_ips,omitempty"`
+	AllowedIPs             []string            `json:"allowed_ips,omitempty"`
+	BlockedConversationIDs []string            `json:"blocked_conversation_ids,omitempty"`
+	BannedContent          []string            `json:"banned_content,omitempty"`
+	BannedRegex            []string            `json:"banned_regex,omitempty"`
+	Jailbreak              JailbreakConfig     `json:"jailbreak,omitempty"`
+	AutoBan                SafetyAutoBanConfig `json:"auto_ban,omitempty"`
 }
 
 type JailbreakConfig struct {
