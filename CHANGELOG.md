@@ -1,5 +1,15 @@
 # 更新日志
 
+## 2026-05-06 (1.0.4)
+
+v1.0.4 是 v1.0.3 milestone 之后的累积小迭代,包含上游 CJackHwang/ds2api v4.2.x → v4.4.x 选择性跟进、CNB PR #15 前端轮询频率优化、以及 GitHub Issue #9 的运维侧文档化。VERSION 从 `1.0.3` 升到 `1.0.4`,正式打 v1.0.4 tag(也是 GitHub Release 的发布载体);v1.0.3 milestone 下的所有累积工作(CDATA 管道变体兼容 / 5-store SQLite / 三层缓存粘性 / 自动拉黑 / 思考超时 7200s 全套 / 安全审计闭环 / MIT 重新许可)继续保留为 1.0.3 子段历史,在本次 release 中也包含。
+
+### 子段 v1.0.4 增量
+
+- **上游 v4.2.x → v4.4.x 选择性跟进(P0×2 + P1×3 / 2 项验证为 N/A)**:见 1.0.3 子段中的"上游 v4.2.x → v4.4.x 选择性跟进"条目(为方便阅读按时间挂在 1.0.3 子段下,实际发布带 v1.0.4 tag)。
+- **webui 前端轮询频率优化(CNB PR #15 采纳)**:三处常量 — `OverviewContainer.HISTORY_SAMPLE_LIMIT 500 → 50` / `REFRESH_MS 2500 → 10000` / `DashboardShell.VERSION_CHECK_INTERVAL_MS 30000 → 600000`。GitHub release tag 检查从 30s 拉到 10 min,不再触发 unauthenticated REST API 60 req/h 上限的 403。
+- **GitHub Issue #9 应对文档**:[`docs/client-compat/claude-code.md` §12](docs/client-compat/claude-code.md) 新增两条已知问题表项 — Claude Code 客户端 BASH 工具默认 120s 超时(用 `BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS` 环境变量延长)+ 思考/工具超时后 session-affinity 卡顿(建议把 `account_max_inflight` 调到 1 让请求 fail-fast)。同步加 v1.0.2 → v1.0.3 升级警示。
+
 ## 2026-05-06 (1.0.3)
 
 本次发布把 v1.0.4 ~ v1.0.12 期间的所有修复与新功能整合回 v1.0.3 版本号下，便于 CNB 主分支保留单一版本里程碑。下面按子段保留每次迭代的明细，方便审计。
