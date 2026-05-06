@@ -41,7 +41,12 @@ const ALLOWED_UPDATE_HOST_PREFIXES = [
     'https://github.com/Meow-Calculations/',
     'https://github.com/meow-calculations/',
 ]
-const VERSION_CHECK_INTERVAL_MS = 30_000
+// 10-minute interval — adopted from CNB PR #15. GitHub's unauthenticated
+// REST API rate-limits to 60 req/h per IP; the previous 30s polling
+// emitted 120 req/h, exhausting the quota and triggering 403 responses
+// for every other admin user behind the same NAT. 10 min = 6 req/h is
+// well under the limit while still surfacing new releases promptly.
+const VERSION_CHECK_INTERVAL_MS = 600_000
 const VERSION_NOTIFY_STORAGE_KEY = 'deepseek-web-to-api_notified_update_tag'
 
 // safeUpdateURL filters the update-notification href so a compromised /
