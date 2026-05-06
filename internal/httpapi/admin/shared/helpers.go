@@ -191,8 +191,21 @@ func mergeAPIKeysPreferStructured(existing, incoming []config.APIKey) ([]config.
 		return nil, 0
 	}
 
-	merged := make([]config.APIKey, 0, len(existing)+len(incoming))
-	index := make(map[string]int, len(existing)+len(incoming))
+	// Bound the capacity hint to satisfy CodeQL go/allocation-size-overflow.
+	// admin API key lists are tiny in practice (operator-managed); 1 << 20
+	// is many orders of magnitude above any realistic value.
+	const maxCap = 1 << 20
+	existingCap := len(existing)
+	if existingCap > maxCap {
+		existingCap = maxCap
+	}
+	remaining := maxCap - existingCap
+	capHint := maxCap
+	if len(incoming) <= remaining {
+		capHint = existingCap + len(incoming)
+	}
+	merged := make([]config.APIKey, 0, capHint)
+	index := make(map[string]int, capHint)
 	for _, item := range existing {
 		item = normalizeAPIKeyForStorage(item)
 		if item.Key == "" {

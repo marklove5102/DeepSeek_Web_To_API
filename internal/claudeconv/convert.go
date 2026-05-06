@@ -18,7 +18,19 @@ func ConvertClaudeToDeepSeek(claudeReq map[string]any, aliasProvider config.Mode
 		dsModel = "deepseek-v4-flash"
 	}
 
-	convertedMessages := make([]any, 0, len(messages)+1)
+	// Compute a bounded capacity hint without overflow risk.
+	const maxMessageCapHint = 1 << 20
+	msgLen := len(messages)
+	capHint := maxMessageCapHint
+	if msgLen < maxMessageCapHint {
+		if msgLen == maxMessageCapHint-1 {
+			capHint = maxMessageCapHint
+		} else {
+			capHint = msgLen
+			capHint++
+		}
+	}
+	convertedMessages := make([]any, 0, capHint)
 	if system := claudeSystemText(claudeReq["system"]); system != "" {
 		convertedMessages = append(convertedMessages, map[string]any{"role": "system", "content": system})
 	}
