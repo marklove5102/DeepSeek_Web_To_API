@@ -86,11 +86,6 @@ func TestAppCORSPreflightIsUnifiedAcrossInterfaces(t *testing.T) {
 			path:    "/v1beta/models/gemini-2.5-pro:generateContent",
 			headers: "x-goog-api-key, x-client-version",
 		},
-		{
-			name:    "admin",
-			path:    "/admin/login",
-			headers: "content-type, x-requested-with",
-		},
 	}
 
 	for _, tc := range cases {
@@ -116,4 +111,51 @@ func TestAppCORSPreflightIsUnifiedAcrossInterfaces(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAdminCORSRejectsCrossOriginPreflight pins the v1.0.3 hardening:
+// /admin/* must NOT echo arbitrary Origins. The audit identified the
+// previous wildcard-reflect behaviour as a P0 — combined with the JWT
+// stored in localStorage it would let an XSS-first attacker chain to a
+// cross-origin admin call. Same-origin preflights still succeed.
+func TestAdminCORSRejectsCrossOriginPreflight(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{"keys":["k1"],"accounts":[{"email":"u@example.com","password":"p"}]}`)
+	t.Setenv("DEEPSEEK_WEB_TO_API_ENV_WRITEBACK", "0")
+
+	app, err := NewApp()
+	if err != nil {
+		t.Fatalf("NewApp() error: %v", err)
+	}
+
+	t.Run("cross_origin_admin_preflight_no_acao", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodOptions, "/admin/login", nil)
+		req.Header.Set("Origin", "https://attacker.example.com")
+		req.Header.Set("Host", "ds2api.local")
+		req.Host = "ds2api.local"
+		req.Header.Set("Access-Control-Request-Headers", "content-type")
+
+		rec := httptest.NewRecorder()
+		app.Router.ServeHTTP(rec, req)
+
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Fatalf("admin preflight from cross-origin must NOT echo origin, got %q", got)
+		}
+	})
+
+	t.Run("same_origin_admin_preflight_echoes", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodOptions, "/admin/login", nil)
+		req.Header.Set("Origin", "https://ds2api.local")
+		req.Host = "ds2api.local"
+		req.Header.Set("Access-Control-Request-Headers", "content-type")
+
+		rec := httptest.NewRecorder()
+		app.Router.ServeHTTP(rec, req)
+
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://ds2api.local" {
+			t.Fatalf("admin preflight from same-origin must echo origin, got %q", got)
+		}
+		if got := rec.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+			t.Fatalf("admin same-origin must allow credentials, got %q", got)
+		}
+	})
 }

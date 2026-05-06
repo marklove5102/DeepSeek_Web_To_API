@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"runtime"
 	"strings"
@@ -112,7 +113,13 @@ func NewApp() (*App, error) {
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	// chi's middleware.RealIP unconditionally rewrites RemoteAddr from
+	// X-Forwarded-For / X-Real-IP / True-Client-IP regardless of who the
+	// peer is. That defeats the trusted-proxy model in
+	// requestmeta.ClientIP, which only honors those headers when the
+	// peer is in the trusted CIDR set. So we deliberately do NOT use
+	// middleware.RealIP here; ClientIP performs the equivalent
+	// resolution with proxy-trust enforcement.
 	r.Use(filteredLogger())
 	r.Use(middleware.Recoverer)
 	r.Use(cors)
@@ -330,7 +337,30 @@ func securityHeaders(next http.Handler) http.Handler {
 
 func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 	origin := strings.TrimSpace(r.Header.Get("Origin"))
-	if origin == "" {
+	path := ""
+	if r.URL != nil {
+		path = r.URL.Path
+	}
+	// /admin/* is the privileged plane — Bearer JWT authentication and
+	// stateful state mutation. Only echo the Origin when it is the same
+	// host the request was delivered to (same-origin). For any other
+	// origin we omit Access-Control-Allow-Origin entirely so the
+	// browser blocks the request before any handler runs. This closes
+	// the wildcard-reflect gap that combined with the localStorage JWT
+	// pattern would otherwise enable cross-origin token theft chains
+	// for an XSS-first attacker.
+	if isAdminPlane(path) {
+		if origin != "" && originMatchesHost(origin, r) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			addVaryHeaderToken(w.Header(), "Origin")
+		}
+		// else: leave Access-Control-Allow-Origin unset; preflight fails.
+	} else if origin == "" {
+		// Public API plane (/v1/*, /healthz, /readyz, etc.). Bearer-auth
+		// requests from non-browser SDKs do not set Origin — emit the
+		// open wildcard so existing OpenAI/Claude/Gemini SDK clients
+		// continue to work unchanged.
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 	} else {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
@@ -344,6 +374,31 @@ func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Private-Network", "true")
 		addVaryHeaderToken(w.Header(), "Access-Control-Request-Private-Network")
 	}
+}
+
+// isAdminPlane returns true for paths that mutate privileged state and
+// must not accept cross-origin requests. The webui static assets at
+// /admin/index.html etc. are intentionally NOT included — those are
+// fetched same-origin by the browser before any cross-origin script
+// has a chance to run.
+func isAdminPlane(path string) bool {
+	return strings.HasPrefix(path, "/admin/")
+}
+
+// originMatchesHost compares the scheme://host of the Origin header
+// against the request's own Host header. The Origin string is parsed
+// strictly — scheme and host must match; port presence/absence on
+// either side requires explicit equality.
+func originMatchesHost(origin string, r *http.Request) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	host := strings.TrimSpace(r.Host)
+	if host == "" {
+		return false
+	}
+	return strings.EqualFold(u.Host, host)
 }
 
 func buildCORSAllowHeaders(r *http.Request) string {
