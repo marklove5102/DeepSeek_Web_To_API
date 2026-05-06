@@ -34,9 +34,13 @@ const (
 
 	// inflightWaitTimeout bounds how long a deduplicated waiter blocks on
 	// the owner's upstream call before falling through to its own upstream
-	// dispatch. Most LLM completions finish under this budget; setting it
-	// short avoids correlated client timeouts when the owner stalls.
-	inflightWaitTimeout = 30 * time.Second
+	// dispatch. Aligned with the global HTTP total timeout (7200s default
+	// since v1.0.6) so long-reasoning Pro-model requests do NOT trigger a
+	// thundering herd of waiters dispatching duplicate upstream calls
+	// when the owner is still legitimately thinking. The owner closes the
+	// inflight slot via defer in Wrap, so panics / early returns wake
+	// every waiter immediately regardless of this ceiling.
+	inflightWaitTimeout = 2 * time.Hour
 )
 
 type CallerResolver interface {
@@ -886,23 +890,44 @@ func (c *Cache) sweepMemoryLocked(now time.Time) {
 }
 
 func (c *Cache) enforceMemoryLimitLocked() {
-	if c.memoryMaxBytes <= 0 {
+	if c.memoryMaxBytes <= 0 || c.memoryBytes <= c.memoryMaxBytes {
 		return
 	}
-	for c.memoryBytes > c.memoryMaxBytes && len(c.items) > 0 {
-		var oldestKey string
-		var oldest memoryEntry
-		first := true
-		for key, item := range c.items {
-			if first || item.memoryExpiresAt.Before(oldest.memoryExpiresAt) {
-				oldestKey = key
-				oldest = item
-				first = false
-			}
+	// Replace the previous O(N²) "scan to find oldest, delete, repeat"
+	// loop with a single O(N log N) sort. Under sustained store pressure
+	// the old version was a measurable DoS vector — an attacker with
+	// caller-bound write access could drive the cache into the eviction
+	// path on every store and pay len(items) per eviction. With an
+	// up-front sort the eviction-loop cost amortizes: one sort + linear
+	// walk down the list until memoryBytes is back under the cap.
+	type evictCandidate struct {
+		key       string
+		expiresAt time.Time
+		size      int64
+		session   string
+	}
+	candidates := make([]evictCandidate, 0, len(c.items))
+	for key, item := range c.items {
+		candidates = append(candidates, evictCandidate{
+			key:       key,
+			expiresAt: item.memoryExpiresAt,
+			size:      item.size,
+			session:   item.sessionKey,
+		})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].expiresAt.Before(candidates[j].expiresAt)
+	})
+	for _, cand := range candidates {
+		if c.memoryBytes <= c.memoryMaxBytes {
+			break
 		}
-		delete(c.items, oldestKey)
-		c.memoryBytes -= oldest.size
-		c.removeFromSessionLocked(oldest.sessionKey, oldestKey)
+		if _, ok := c.items[cand.key]; !ok {
+			continue
+		}
+		delete(c.items, cand.key)
+		c.memoryBytes -= cand.size
+		c.removeFromSessionLocked(cand.session, cand.key)
 	}
 	if c.memoryBytes < 0 {
 		c.memoryBytes = 0

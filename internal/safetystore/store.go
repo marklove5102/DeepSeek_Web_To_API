@@ -280,6 +280,15 @@ func NewIPsStore(path string) (*IPsStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open safety ips sqlite: %w", err)
 	}
+	// SetMaxOpenConns(1) is LOAD-BEARING — do not raise without thinking.
+	// modernc.org/sqlite serializes writes per database handle, but with
+	// multiple handles a transaction in flight on handle A can race a
+	// concurrent write on handle B and SQLITE_BUSY occurs unpredictably.
+	// replaceTable in particular runs DELETE-then-INSERT inside a tx; if
+	// another write opens a competing handle the tx can roll back with a
+	// half-mutated state visible to readers in the same process. Pinning
+	// to a single connection guarantees serial access and makes the
+	// in-tx atomicity contract observable.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	store := &IPsStore{path: path, db: db}

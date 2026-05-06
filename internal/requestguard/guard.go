@@ -295,7 +295,14 @@ func Middleware(opts Options) func(http.Handler) http.Handler {
 					if opts.Store != nil {
 						autoBanCfg = opts.Store.SafetyConfig().AutoBan
 					}
-					tracker.note(meta.ClientIP, autoBanCfg, time.Now())
+					// note() returns true when this violation tipped
+					// the IP over the threshold and the ban committed
+					// to SQLite. The tracker already emits a WARN log
+					// on commit and the new row appears in
+					// safety_ips.blocked_ips, so the audit-trail event
+					// is fully captured without additional plumbing
+					// here. Discarding the return is intentional.
+					_ = tracker.note(meta.ClientIP, autoBanCfg, time.Now())
 				}
 				recordBlockedHistory(opts.ChatHistory, rawBody, meta, d)
 				writeBlocked(w, p.blockMessage, d)

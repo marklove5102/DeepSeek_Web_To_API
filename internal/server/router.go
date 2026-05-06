@@ -331,8 +331,51 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		// Content-Security-Policy is applied to admin/webui responses
+		// only — the public API plane returns JSON / SSE consumed by
+		// SDKs that have no DOM, and shipping CSP there is noise.
+		// `default-src 'self'` blocks every external resource by
+		// default; `connect-src 'self' https://api.github.com` lets
+		// the dashboard's "check for new release" probe still reach
+		// the GitHub API; `script-src 'self'` blocks inline scripts
+		// (the React build emits hashed asset bundles, no inline);
+		// `style-src 'self' 'unsafe-inline'` is required by Tailwind
+		// keyframe + utility-class injection at runtime.
+		path := ""
+		if r.URL != nil {
+			path = r.URL.Path
+		}
+		if isWebAdminPath(path) {
+			w.Header().Set("Content-Security-Policy",
+				"default-src 'self'; "+
+					"script-src 'self'; "+
+					"style-src 'self' 'unsafe-inline'; "+
+					"img-src 'self' data:; "+
+					"font-src 'self' data:; "+
+					"connect-src 'self' https://api.github.com; "+
+					"frame-ancestors 'none'; "+
+					"base-uri 'self'; "+
+					"form-action 'self'")
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isWebAdminPath returns true for the WebUI HTML / asset surface where
+// CSP is meaningful. The admin JSON API (/admin/*) and the public LLM
+// proxy plane do not render HTML and are excluded.
+func isWebAdminPath(path string) bool {
+	if path == "" || path == "/" {
+		return true
+	}
+	switch {
+	case strings.HasPrefix(path, "/static/"),
+		strings.HasPrefix(path, "/admin/"),
+		strings.HasPrefix(path, "/webui/"),
+		strings.HasPrefix(path, "/assets/"):
+		return true
+	}
+	return false
 }
 
 func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
