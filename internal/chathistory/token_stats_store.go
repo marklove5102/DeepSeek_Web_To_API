@@ -2,7 +2,6 @@ package chathistory
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -44,7 +43,6 @@ type tokenStatsStore struct {
 	mu   sync.Mutex
 	path string
 	db   *sql.DB
-	err  error
 }
 
 const (
@@ -301,21 +299,4 @@ func (s *tokenStatsStore) migrateLegacyRollupOnce(legacyTotal TokenUsageTotals, 
 		return err
 	}
 	return s.markMigrated()
-}
-
-// jsonOrEmpty is a tiny helper for tests / debug output.
-func (s *tokenStatsStore) jsonOrEmpty() string {
-	total, byModel, err := s.readRollup()
-	if err != nil {
-		return ""
-	}
-	payload := map[string]any{
-		"total":    total,
-		"by_model": byModel,
-	}
-	b, err := json.Marshal(payload)
-	if err != nil {
-		return ""
-	}
-	return string(b)
 }

@@ -397,17 +397,6 @@ func RequestKey(r *http.Request, owner string, body []byte) string {
 	return requestKey(r, owner, body, true, policy)
 }
 
-func (c *Cache) requestKey(r *http.Request, owner string, body []byte) string {
-	if c == nil {
-		return RequestKey(r, owner, body)
-	}
-	policy := pathPolicy{}
-	if r != nil && r.URL != nil {
-		policy = pathPolicyFor(canonicalRequestPath(r.URL.Path))
-	}
-	return requestKey(r, owner, body, c.semanticKey, policy)
-}
-
 func (c *Cache) requestKeyWithPolicy(r *http.Request, owner string, body []byte, policy pathPolicy) string {
 	if c == nil {
 		return requestKey(r, owner, body, true, policy)
@@ -619,7 +608,7 @@ func (c *Cache) getWithPolicy(key string, policy pathPolicy) (Entry, string, boo
 		c.recordMiss(policy.Path)
 		return Entry{}, "", false
 	}
-	c.putMemoryWithPolicy(key, entry, now, policy)
+	c.putMemoryWithPolicySession(key, "", entry, now, policy)
 	c.recordHit(policy.Path, "disk")
 	return cloneEntry(entry), "disk", true
 }
@@ -722,10 +711,6 @@ func (c *Cache) Set(key string, entry Entry) {
 	c.setWithPolicySession(key, "", entry, pathPolicy{})
 }
 
-func (c *Cache) setWithPolicy(key string, entry Entry, policy pathPolicy) {
-	c.setWithPolicySession(key, "", entry, policy)
-}
-
 func (c *Cache) setWithPolicySession(key, sessionKey string, entry Entry, policy pathPolicy) {
 	key = normalizeKey(key)
 	if key == "" || !entry.cacheable(c.maxBody) {
@@ -813,14 +798,6 @@ func canonicalRequestPath(path string) string {
 	default:
 		return path
 	}
-}
-
-func (c *Cache) putMemory(key string, entry Entry, now time.Time) {
-	c.putMemoryWithPolicySession(key, "", entry, now, pathPolicy{})
-}
-
-func (c *Cache) putMemoryWithPolicy(key string, entry Entry, now time.Time, policy pathPolicy) {
-	c.putMemoryWithPolicySession(key, "", entry, now, policy)
 }
 
 func (c *Cache) putMemoryWithPolicySession(key, sessionKey string, entry Entry, now time.Time, policy pathPolicy) {
