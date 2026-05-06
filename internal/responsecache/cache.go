@@ -30,6 +30,12 @@ const (
 	defaultMemoryMaxBytes = int64(3800 * 1000 * 1000)
 	defaultDiskMaxBytes   = int64(16 * 1000 * 1000 * 1000)
 	recordVersion         = 1
+
+	// inflightWaitTimeout bounds how long a deduplicated waiter blocks on
+	// the owner's upstream call before falling through to its own upstream
+	// dispatch. Most LLM completions finish under this budget; setting it
+	// short avoids correlated client timeouts when the owner stalls.
+	inflightWaitTimeout = 30 * time.Second
 )
 
 type CallerResolver interface {
@@ -63,12 +69,25 @@ type Cache struct {
 	stores         int64
 	memoryHits     int64
 	diskHits       int64
+	inflightHits   int64
 	uncacheable    map[string]int64
 	pathStats      map[string]*pathStat
 	items          map[string]memoryEntry
+	inflight       map[string]*inflightSlot
 	lastDiskSweep  time.Time
 	onHit          HitFunc
 	semanticKey    bool
+}
+
+// inflightSlot collapses concurrent identical requests onto a single
+// upstream call ("single-flight"). The owner runs the upstream handler;
+// waiters block on `done` until the owner releases. After release, waiters
+// re-check the cache and serve the freshly-stored entry. This is a major
+// component of session stickiness: when a flaky client retries an in-flight
+// request, the second arrival waits for the first to complete instead of
+// dispatching its own upstream call.
+type inflightSlot struct {
+	done chan struct{}
 }
 
 // pathStat aggregates lifecycle counters for a single canonical request
@@ -76,12 +95,13 @@ type Cache struct {
 // answerable: embeddings vs. chat completions are different workloads with
 // different ceilings, and aggregate stats hide which path is the bottleneck.
 type pathStat struct {
-	Hits        int64
-	Misses      int64
-	Stores      int64
-	MemoryHits  int64
-	DiskHits    int64
-	Uncacheable map[string]int64
+	Hits         int64
+	Misses       int64
+	Stores       int64
+	MemoryHits   int64
+	DiskHits     int64
+	InflightHits int64
+	Uncacheable  map[string]int64
 }
 
 type Entry struct {
@@ -119,6 +139,7 @@ func New(opts Options) *Cache {
 		uncacheable:    map[string]int64{},
 		pathStats:      map[string]*pathStat{},
 		items:          map[string]memoryEntry{},
+		inflight:       map[string]*inflightSlot{},
 		onHit:          opts.OnHit,
 		semanticKey:    opts.SemanticKey,
 	}
@@ -182,6 +203,9 @@ func (c *Cache) ApplyOptions(opts Options) {
 	c.lastDiskSweep = time.Time{}
 	if c.pathStats == nil {
 		c.pathStats = map[string]*pathStat{}
+	}
+	if c.inflight == nil {
+		c.inflight = map[string]*inflightSlot{}
 	}
 }
 
@@ -247,8 +271,30 @@ func (c *Cache) Wrap(resolver CallerResolver, next http.Handler) http.Handler {
 			return
 		}
 
+		// Single-flight: if another request with this exact cache key is
+		// already running upstream, wait for its result instead of
+		// dispatching a duplicate. This is the second arm of the session
+		// stickiness contract — flaky-client retries during streaming
+		// collapse onto the in-flight call.
+		slot, isOwner := c.acquireInflight(key)
+		if !isOwner {
+			waited, served := c.waitForInflightOwner(w, r, slot, key, policy)
+			if served {
+				return
+			}
+			if !waited {
+				return
+			}
+			// Owner finished but did not produce a cacheable entry, OR we
+			// timed out — fall through and run our own upstream call. Note
+			// we are NOT the owner: do not release the slot.
+		}
+
 		r.Body = io.NopCloser(bytes.NewReader(rawBody))
 		cw := newCaptureResponseWriter(w, c.maxBody)
+		if isOwner {
+			defer c.releaseInflight(key)
+		}
 		next.ServeHTTP(cw, r)
 		if entry, ok, reason := cw.cacheEntry(); ok {
 			c.setWithPolicy(key, entry, policy)
@@ -256,6 +302,34 @@ func (c *Cache) Wrap(resolver CallerResolver, next http.Handler) http.Handler {
 			c.recordUncacheable(policy.Path, reason)
 		}
 	})
+}
+
+// waitForInflightOwner blocks the caller until the in-flight owner closes
+// the slot's done channel, the wait times out, or the client cancels.
+// Returns (continueToUpstream, alreadyServed). When the owner produced a
+// cacheable response, the function serves it from cache and returns
+// (false, true). When the wait times out or the owner produced nothing
+// cacheable, returns (true, false) so Wrap falls through to upstream. When
+// the client cancelled, returns (false, false) so Wrap aborts cleanly.
+func (c *Cache) waitForInflightOwner(w http.ResponseWriter, r *http.Request, slot *inflightSlot, key string, policy pathPolicy) (continueUpstream, alreadyServed bool) {
+	timer := time.NewTimer(inflightWaitTimeout)
+	defer timer.Stop()
+	select {
+	case <-slot.done:
+		if entry, source, ok := c.getWithPolicy(key, policy); ok {
+			c.recordInflightHit(policy.Path)
+			if c.onHit != nil {
+				c.onHit(r, cloneEntry(entry), source)
+			}
+			writeCachedResponse(w, entry, source)
+			return false, true
+		}
+		return true, false
+	case <-timer.C:
+		return true, false
+	case <-r.Context().Done():
+		return false, false
+	}
 }
 
 func CacheableRequest(r *http.Request) bool {
@@ -493,6 +567,7 @@ func (c *Cache) getWithPolicy(key string, policy pathPolicy) (Entry, string, boo
 	if item, ok := c.items[key]; ok {
 		if now.Before(item.memoryExpiresAt) && now.Before(item.entry.DiskExpiresAt) {
 			entry := cloneEntry(item.entry)
+			c.bumpMemoryExpiryLocked(key, now, policy)
 			c.recordHitLocked(policy.Path, "memory")
 			c.mu.Unlock()
 			return entry, "memory", true
@@ -509,6 +584,35 @@ func (c *Cache) getWithPolicy(key string, policy pathPolicy) (Entry, string, boo
 	c.putMemoryWithPolicy(key, entry, now, policy)
 	c.recordHit(policy.Path, "disk")
 	return cloneEntry(entry), "disk", true
+}
+
+// bumpMemoryExpiryLocked extends a memory entry's lease on access ("sliding
+// window TTL"). Active conversations that keep hitting the same prefix —
+// e.g., long-context coding agents that retry within a turn, or clients
+// that re-issue identical tool calls — keep their entry hot beyond the
+// initial memoryTTL. The extension is capped by the entry's disk
+// expiration: once disk has expired, the cache row is logically dead even
+// if memory keeps requesting it. Callers must hold c.mu.
+func (c *Cache) bumpMemoryExpiryLocked(key string, now time.Time, policy pathPolicy) {
+	item, ok := c.items[key]
+	if !ok {
+		return
+	}
+	memoryTTL := c.memoryTTL
+	if policy.MemoryTTL > 0 {
+		memoryTTL = policy.MemoryTTL
+	}
+	if memoryTTL <= 0 {
+		return
+	}
+	extended := now.Add(memoryTTL)
+	if item.entry.DiskExpiresAt.Before(extended) {
+		extended = item.entry.DiskExpiresAt
+	}
+	if extended.After(item.memoryExpiresAt) {
+		item.memoryExpiresAt = extended
+		c.items[key] = item
+	}
 }
 
 // Set is a backward-compatible wrapper that uses no path policy (the global
@@ -716,6 +820,49 @@ func (c *Cache) recordStore(path string) {
 	if stat := c.pathStatLocked(path); stat != nil {
 		stat.Stores++
 	}
+}
+
+func (c *Cache) recordInflightHit(path string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.inflightHits++
+	if stat := c.pathStatLocked(path); stat != nil {
+		stat.InflightHits++
+		stat.Hits++
+	}
+	c.hits++
+}
+
+// acquireInflight registers the caller as the owner of a single-flight slot
+// when no other request is in flight for the same key, or returns the
+// existing slot for the caller to wait on. Returns (slot, isOwner). Owners
+// MUST call releaseInflight in a defer so waiters can wake.
+func (c *Cache) acquireInflight(key string) (*inflightSlot, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.inflight == nil {
+		c.inflight = map[string]*inflightSlot{}
+	}
+	if slot, ok := c.inflight[key]; ok {
+		return slot, false
+	}
+	slot := &inflightSlot{done: make(chan struct{})}
+	c.inflight[key] = slot
+	return slot, true
+}
+
+// releaseInflight closes the slot's done channel and removes it from the
+// in-flight map. Safe to call multiple times — the second call is a no-op.
+func (c *Cache) releaseInflight(key string) {
+	c.mu.Lock()
+	slot, ok := c.inflight[key]
+	if !ok {
+		c.mu.Unlock()
+		return
+	}
+	delete(c.inflight, key)
+	c.mu.Unlock()
+	close(slot.done)
 }
 
 func (c *Cache) recordUncacheable(path, reason string) {
@@ -1301,6 +1448,8 @@ func (c *Cache) Stats() map[string]any {
 		"uncacheable_misses": uncacheableTotal,
 		"memory_hits":        c.memoryHits,
 		"disk_hits":          c.diskHits,
+		"inflight_hits":      c.inflightHits,
+		"inflight_pending":   len(c.inflight),
 		"memory_items":       len(c.items),
 		"memory_bytes":       c.memoryBytes,
 		"memory_max_bytes":   c.memoryMaxBytes,
@@ -1331,6 +1480,7 @@ func (c *Cache) Stats() map[string]any {
 				"stores":             stat.Stores,
 				"memory_hits":        stat.MemoryHits,
 				"disk_hits":          stat.DiskHits,
+				"inflight_hits":      stat.InflightHits,
 				"cacheable_lookups":  pathCacheableLookups,
 				"cacheable_misses":   stat.Stores,
 				"uncacheable_misses": uncacheableSum,

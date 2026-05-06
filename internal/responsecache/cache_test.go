@@ -27,6 +27,130 @@ func (s stubResolver) DetermineCaller(_ *http.Request) (*auth.RequestAuth, error
 	return &auth.RequestAuth{CallerID: s.caller}, nil
 }
 
+// TestSlidingWindowKeepsActiveEntryHot pins the session-stickiness contract:
+// every memory hit must extend the entry's lease by memoryTTL (capped by
+// disk expiration). Active conversations that keep hitting the same key
+// stay hot beyond the initial TTL, while inactive entries still age out at
+// the original ceiling.
+func TestSlidingWindowKeepsActiveEntryHot(t *testing.T) {
+	t.Parallel()
+
+	// Memory TTL = 200ms so the test runs fast. Disk TTL = 1h so the
+	// extension cap is far away and never engages.
+	cache := New(Options{Dir: t.TempDir(), MemoryTTL: 200 * time.Millisecond, DiskTTL: time.Hour})
+	var upstream int32
+	handler := cache.Wrap(stubResolver{caller: "caller-a"}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&upstream, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"sticky":true}`))
+	}))
+
+	body := `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}`
+	mkReq := func() *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer key-a")
+		return req
+	}
+
+	// Prime: store one entry.
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, mkReq())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("prime status=%d", rec.Code)
+	}
+
+	// Hit just before the original 200ms TTL would expire (130ms in). The
+	// hit must succeed AND must bump the expiration to now+200ms.
+	time.Sleep(130 * time.Millisecond)
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, mkReq())
+	if got := rec2.Header().Get("X-DeepSeek-Web-To-API-Cache"); got != "memory" {
+		t.Fatalf("expected memory hit at 130ms, got %q", got)
+	}
+
+	// Wait another 130ms (260ms total). Without sliding window, the entry
+	// would have expired at 200ms. With sliding window, the previous hit
+	// at 130ms reset expiration to 330ms, so this request must still hit.
+	time.Sleep(130 * time.Millisecond)
+	rec3 := httptest.NewRecorder()
+	handler.ServeHTTP(rec3, mkReq())
+	if got := rec3.Header().Get("X-DeepSeek-Web-To-API-Cache"); got != "memory" {
+		t.Fatalf("expected sliding-window memory hit at 260ms, got %q", got)
+	}
+
+	// Three requests, one upstream call — the prime.
+	if got := atomic.LoadInt32(&upstream); got != 1 {
+		t.Fatalf("expected exactly one upstream call, got %d", got)
+	}
+}
+
+// TestSingleFlightDedupesConcurrentIdenticalRequests pins the in-flight
+// dedup contract: when N requests with the same cache key arrive while an
+// upstream call is in progress, only one upstream call runs and the
+// remaining N-1 wait on the in-flight slot, then serve from cache. This is
+// what protects upstream from flaky-client retries during streaming.
+func TestSingleFlightDedupesConcurrentIdenticalRequests(t *testing.T) {
+	t.Parallel()
+
+	cache := New(Options{Dir: t.TempDir(), MemoryTTL: time.Minute, DiskTTL: time.Hour})
+	var upstream int32
+	releaseUpstream := make(chan struct{})
+	handler := cache.Wrap(stubResolver{caller: "caller-a"}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&upstream, 1)
+		// Block long enough for waiters to enter the in-flight slot.
+		<-releaseUpstream
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"first":true}`))
+	}))
+
+	body := `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}`
+	mkReq := func() *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer key-a")
+		return req
+	}
+
+	const concurrency = 5
+	results := make(chan *httptest.ResponseRecorder, concurrency)
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, mkReq())
+			results <- rec
+		}()
+	}
+
+	// Give all goroutines time to register: owner runs upstream, others
+	// land in the inflight wait.
+	time.Sleep(50 * time.Millisecond)
+	close(releaseUpstream)
+
+	for i := 0; i < concurrency; i++ {
+		select {
+		case rec := <-results:
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if got := rec.Body.String(); got != `{"first":true}` {
+				t.Fatalf("unexpected body: %s", got)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout waiting for concurrent request to complete")
+		}
+	}
+
+	if got := atomic.LoadInt32(&upstream); got != 1 {
+		t.Fatalf("expected single-flight to dedupe to 1 upstream call, got %d", got)
+	}
+	stats := cache.Stats()
+	inflightHits, _ := stats["inflight_hits"].(int64)
+	if inflightHits < int64(concurrency-1) {
+		t.Fatalf("inflight_hits = %d, want >= %d", inflightHits, concurrency-1)
+	}
+}
+
 // TestEmbeddingsCacheSharesAcrossCallers verifies the policy from
 // docs/cache-research.md §4: embeddings are deterministic functions of input
 // text so cross-caller sharing is safe and prevents redundant upstream

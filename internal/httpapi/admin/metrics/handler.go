@@ -67,6 +67,8 @@ type overviewCacheStats struct {
 	UncacheableOversized    int64                            `json:"uncacheable_oversized_response"`
 	UncacheableNoStore      int64                            `json:"uncacheable_response_no_store"`
 	UncacheableSetCookie    int64                            `json:"uncacheable_set_cookie"`
+	InflightHits            int64                            `json:"inflight_hits"`
+	InflightPending         int64                            `json:"inflight_pending"`
 	MemoryItems             int64                            `json:"memory_items"`
 	MemoryBytes             int64                            `json:"memory_bytes"`
 	MemoryMaxBytes          int64                            `json:"memory_max_bytes"`
@@ -89,6 +91,7 @@ type overviewCachePathStat struct {
 	Stores            int64   `json:"stores"`
 	MemoryHits        int64   `json:"memory_hits"`
 	DiskHits          int64   `json:"disk_hits"`
+	InflightHits      int64   `json:"inflight_hits"`
 	CacheableLookups  int64   `json:"cacheable_lookups"`
 	CacheableMisses   int64   `json:"cacheable_misses"`
 	UncacheableMisses int64   `json:"uncacheable_misses"`
@@ -265,6 +268,8 @@ func (h *Handler) cacheStats() overviewCacheStats {
 		UncacheableOversized:    int64Stat(raw, "uncacheable_oversized_response"),
 		UncacheableNoStore:      int64Stat(raw, "uncacheable_response_no_store"),
 		UncacheableSetCookie:    int64Stat(raw, "uncacheable_set_cookie"),
+		InflightHits:            int64Stat(raw, "inflight_hits"),
+		InflightPending:         int64Stat(raw, "inflight_pending"),
 		MemoryItems:             int64Stat(raw, "memory_items"),
 		MemoryBytes:             int64Stat(raw, "memory_bytes"),
 		MemoryMaxBytes:          int64Stat(raw, "memory_max_bytes"),
@@ -303,6 +308,7 @@ func (h *Handler) cacheStats() overviewCacheStats {
 				Stores:            pathStores,
 				MemoryHits:        int64Stat(entry, "memory_hits"),
 				DiskHits:          int64Stat(entry, "disk_hits"),
+				InflightHits:      int64Stat(entry, "inflight_hits"),
 				CacheableLookups:  pathCacheableLookups,
 				CacheableMisses:   int64Stat(entry, "cacheable_misses"),
 				UncacheableMisses: int64Stat(entry, "uncacheable_misses"),
