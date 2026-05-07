@@ -212,6 +212,18 @@ func (c Config) Clone() Config {
 				Threshold:     c.Safety.AutoBan.Threshold,
 				WindowSeconds: c.Safety.AutoBan.WindowSeconds,
 			},
+			DisabledBuiltinRules: slices.Clone(c.Safety.DisabledBuiltinRules),
+			LLMCheck: SafetyLLMCheckConfig{
+				Enabled:         cloneBoolPtr(c.Safety.LLMCheck.Enabled),
+				Model:           c.Safety.LLMCheck.Model,
+				TimeoutMs:       c.Safety.LLMCheck.TimeoutMs,
+				FailOpen:        cloneBoolPtr(c.Safety.LLMCheck.FailOpen),
+				CacheTTLSeconds: c.Safety.LLMCheck.CacheTTLSeconds,
+				CacheMaxEntries: c.Safety.LLMCheck.CacheMaxEntries,
+				MinInputChars:   c.Safety.LLMCheck.MinInputChars,
+				MaxInputChars:   c.Safety.LLMCheck.MaxInputChars,
+				MaxConcurrent:   c.Safety.LLMCheck.MaxConcurrent,
+			},
 		},
 		Runtime: c.Runtime,
 		Compat: CompatConfig{

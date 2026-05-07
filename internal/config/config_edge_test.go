@@ -775,3 +775,55 @@ func TestClaudeModelsResponse(t *testing.T) {
 		t.Fatal("expected non-empty models list")
 	}
 }
+
+// TestSafetyConfigCloneRoundTripsLLMCheck guards against the v1.0.14→v1.0.16
+// regression where SafetyLLMCheckConfig (and DisabledBuiltinRules) were
+// added to the JSON schema but Config.Clone forgot to copy them. The bug
+// surfaced as "WebUI safety.llm_check toggle disappears after save" — the
+// PUT path wrote the value into store.cfg, but every subsequent Snapshot
+// / saveLocked clone dropped LLMCheck to zero, so prod config.json ended
+// up with `"llm_check": {}` and the runtime checker never saw enabled=true.
+func TestSafetyConfigCloneRoundTripsLLMCheck(t *testing.T) {
+	enabled := true
+	failOpen := false
+	src := Config{
+		Safety: SafetyConfig{
+			DisabledBuiltinRules: []string{"r18.cn.act.1", "ctf.en.1"},
+			LLMCheck: SafetyLLMCheckConfig{
+				Enabled:         &enabled,
+				Model:           "deepseek-v4-flash-nothinking",
+				TimeoutMs:       4321,
+				FailOpen:        &failOpen,
+				CacheTTLSeconds: 999,
+				CacheMaxEntries: 7777,
+				MinInputChars:   42,
+				MaxInputChars:   9999,
+				MaxConcurrent:   24,
+			},
+		},
+	}
+	clone := src.Clone()
+	got := clone.Safety.LLMCheck
+	if got.Enabled == nil || *got.Enabled != true {
+		t.Fatalf("Enabled: want &true, got %#v", got.Enabled)
+	}
+	if got.FailOpen == nil || *got.FailOpen != false {
+		t.Fatalf("FailOpen: want &false, got %#v", got.FailOpen)
+	}
+	if got.Model != "deepseek-v4-flash-nothinking" || got.TimeoutMs != 4321 ||
+		got.CacheTTLSeconds != 999 || got.CacheMaxEntries != 7777 ||
+		got.MinInputChars != 42 || got.MaxInputChars != 9999 ||
+		got.MaxConcurrent != 24 {
+		t.Fatalf("LLMCheck scalar fields lost in Clone: %#v", got)
+	}
+	// Independent backing memory for *bool fields.
+	*got.Enabled = false
+	if src.Safety.LLMCheck.Enabled != nil && *src.Safety.LLMCheck.Enabled != true {
+		t.Fatal("Clone shared the Enabled *bool with the source — must be independent")
+	}
+	if len(clone.Safety.DisabledBuiltinRules) != 2 ||
+		clone.Safety.DisabledBuiltinRules[0] != "r18.cn.act.1" ||
+		clone.Safety.DisabledBuiltinRules[1] != "ctf.en.1" {
+		t.Fatalf("DisabledBuiltinRules lost in Clone: %#v", clone.Safety.DisabledBuiltinRules)
+	}
+}

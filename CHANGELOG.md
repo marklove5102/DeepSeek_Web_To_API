@@ -1,5 +1,15 @@
 # 更新日志
 
+## 2026-05-08 (1.0.16)
+
+v1.0.16 修复 v1.0.14 起的 **`Config.Clone()` 漏拷 `Safety.LLMCheck`** 导致 LLM 审核切不上 / WebUI 勾选保存后回弹的 bug。
+
+### 子段 v1.0.16 修复
+
+- **`internal/config/codec.go` `Clone()` 补全 `Safety.LLMCheck` 与 `Safety.DisabledBuiltinRules` 字段**：v1.0.13 引入 `DisabledBuiltinRules` 与 v1.0.14 引入 `LLMCheck` 时，`SafetyConfig` 的 Clone 路径只手工拷贝了原有字段，新字段被默默丢弃。后果：① `Store.Update`（PUT /admin/settings 写路径）调 `saveLocked` → Clone → 序列化到 config.json 的 `llm_check` 永远是 `{}`，零值落盘；② `Store.Snapshot()` 也调 Clone → router 里的 `safetyLLMConfigSource.SafetyLLMCheckConfig()` 拿到的 LLMCheck 永远 enabled=false → handler hook 直接 no-op；③ WebUI hydrate 时 GET /admin/settings 返回 enabled=false → 勾选框翻回未勾，用户视觉表现就是"保存后勾选自动消失"。**修复**：在 [`internal/config/codec.go`](internal/config/codec.go) `Clone()` 的 SafetyConfig 拷贝段补 `LLMCheck` 全部 9 个字段（含 `cloneBoolPtr` 处理 `Enabled` / `FailOpen` 两个 *bool）+ `DisabledBuiltinRules` 切片。从 v1.0.16 起 LLM 审核 toggle 在 WebUI 真的能切上、能持久化、能热更新。
+- **回归测试 `TestSafetyConfigCloneRoundTripsLLMCheck`** ：[`internal/config/config_edge_test.go`](internal/config/config_edge_test.go) 构造一份完整 SafetyLLMCheckConfig + DisabledBuiltinRules，调 Clone 后断言每个字段都按值拷贝（`*bool` 字段独立内存）；再 marshal+unmarshal round-trip 验证序列化路径不丢字段。
+- **保留 v1.0.15 的 hot-reload 机制**：v1.0.15 的 `safetyllm.ConfigSource` + `NewLLMCheckerWithSource` 设计本身正确，问题不在那；本版本只是修了上游 store 路径的 Clone 漏拷。WebUI 切 enabled=true 后**下一个**请求即生效，无需重启。
+
 ## 2026-05-08 (1.0.15)
 
 v1.0.15 修复 v1.0.14 的"WebUI 切 LLM 审核 enabled 不生效"问题：v1.0.14 的 `LLMChecker` 在 router 启动时持配置快照，运营方在 WebUI 切 `safety.llm_check.enabled=true` 后必须**重启进程**才生效——这是 release notes 已经标注但用户实际遇到的体验障碍。
