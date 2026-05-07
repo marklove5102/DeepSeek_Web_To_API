@@ -37,12 +37,10 @@ func RunSafetyCheckAndBlock(ctx context.Context, checker safetyllm.Checker, a *a
 	if checker == nil || !checker.Enabled() {
 		return false
 	}
-	verdict, err := checker.CheckWithAuth(ctx, a, text)
-	if err != nil {
-		// safetyllm itself never returns err in fail-open; if we got one
-		// it's a fail-closed verdict already shaped as Violation=true.
-		// Treat as block.
-	}
+	// safetyllm itself never returns err in fail-open; a non-nil err is a
+	// fail-closed verdict already shaped as Violation=true, so we discard
+	// the error and read the verdict directly.
+	verdict, _ := checker.CheckWithAuth(ctx, a, text)
 	if !verdict.Violation {
 		return false
 	}

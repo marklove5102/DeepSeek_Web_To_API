@@ -1,5 +1,16 @@
 # 更新日志
 
+## 2026-05-08 (1.0.20)
+
+v1.0.20 修复 v1.0.19 release-artifacts CI 在 lint 阶段失败：① v1.0.19 新加的 `RunSafetyCheckAndBlock` 留了一个空 `if err != nil { /* ... */ }` 分支被 staticcheck SA9003 报错；② v1.0.14 删除内置违禁清单时遗留的 6 处死代码（`policy` 结构体的 `bannedContent` / `bannedRegex` / `jailbreakEnabled` / `jailbreakPatterns` 字段、`defaultJailbreakPatterns` 全局变量、`isContentScanExempt` 函数）被 unused linter 报错——这些自 v1.0.14 起就堆积在 `internal/requestguard/guard.go` 内，但 release-artifacts 工作流升级 golangci-lint 后才暴露。VERSION 从 `1.0.19` 升到 `1.0.20`。
+
+### 子段 v1.0.20 修复
+
+- **`internal/httpapi/openai/shared/safety_llm_helper.go`**：把 `verdict, err := checker.CheckWithAuth(...); if err != nil { /* comment-only body */ }` 改成 `verdict, _ := checker.CheckWithAuth(...)` —— safetyllm 永远在 fail-open 路径下吞 err，fail-closed 时 err 也是非 nil 但 verdict 已经 shaped 成 Violation=true，所以读 verdict 即可、err 无需消费。
+- **`internal/requestguard/guard.go` 清理 v1.0.14 遗留死代码**：① `policy` 结构去掉 `bannedContent` / `bannedRegex` / `jailbreakEnabled` / `jailbreakPatterns` 4 个字段——v1.0.14 把 substring/regex 安全清单改为 LLM 审核后这 4 个字段就再没人写也没人读，但当时漏删；② 删 `defaultJailbreakPatterns` 全局变量（16 条 substring 越狱字符串）；③ 删 `isContentScanExempt` 函数——配合内容扫描豁免逻辑早已在 v1.0.14 移除上层调用；④ 删 `regexp` 包 import（唯一用途是 `bannedRegex`，字段移除后 unused）。`extractRequestText` / `recordBlockedHistory` / `autoBanTracker` / IP 黑白名单 / 会话 ID 拦截 / `Middleware` 主路径全部不变——guard 现在专注 IP / conversation_id 拦截 + auto-ban，内容审核完全交给 v1.0.14+ 的 safetyllm hook。
+- **CI 验证**：本地 `golangci-lint v2.11.4 run ./...` 输出 `0 issues`。预期 v1.0.20 release-artifacts 工作流通过 Release Blocking Gates → 构建 ghcr.io 镜像 → 上传 release artifacts。
+- **运营动作**：v1.0.19 已部署到 prod，运行表现正常（误判率修复已生效）；v1.0.20 仅清理死代码 + 1 个 staticcheck 修复，无运行时行为差异，**生产可选择跳过部署**直接等下次正常发版搭车，亦可立即部署确保产物与 git tag 一致。
+
 ## 2026-05-08 (1.0.19)
 
 v1.0.19 修复 v1.0.14 起 LLM 安全审核高误判率问题：审核 LLM 看到的不是用户原文，而是网关组装好的 `FinalPrompt`（含 system prompt + 历史 + thinking-injection banner + DeepSeek 协议标记），导致 30/53（57%）正常请求被 403 拦截，包括 "我思故我在是什么意思？" / "你会角色扮演吗？" / RIPPLE 对话判定 / 翻译 prompt 等明显合法内容。同时修复 v1.0.17/v1.0.18 release-artifacts CI 失败（Stats 结构 gofmt 漂移）。VERSION 从 `1.0.18` 升到 `1.0.19`。

@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -51,10 +50,6 @@ type policy struct {
 	blockMessage           string
 	blockedIPs             []ipMatcher
 	blockedConversationIDs map[string]struct{}
-	bannedContent          []string
-	bannedRegex            []*regexp.Regexp
-	jailbreakEnabled       bool
-	jailbreakPatterns      []string
 }
 
 type ipMatcher struct {
@@ -246,25 +241,6 @@ func (t *autoBanTracker) sweepLocked(window time.Duration, now time.Time) {
 			delete(t.offenders, ip)
 		}
 	}
-}
-
-var defaultJailbreakPatterns = []string{
-	"ignore previous instructions",
-	"disregard previous instructions",
-	"ignore all previous instructions",
-	"bypass safety",
-	"disable safety",
-	"developer mode",
-	"dan mode",
-	"jailbreak",
-	"system prompt leak",
-	"reveal your system prompt",
-	"忽略之前",
-	"无视之前",
-	"无视系统",
-	"绕过安全",
-	"关闭安全",
-	"泄露系统提示",
 }
 
 func Middleware(opts Options) func(http.Handler) http.Handler {
@@ -540,29 +516,6 @@ func (p policy) ipBlocked(rawIP string) bool {
 		if matcher.cidr != nil && matcher.cidr.Contains(ip) {
 			return true
 		}
-	}
-	return false
-}
-
-// isContentScanExempt skips body content scanning for admin / webui / health
-// paths. IP and conversation-id blocking still apply globally; only the
-// keyword/regex/jailbreak scan is bypassed so operators cannot lock themselves
-// out by configuring a banned word that legitimately appears in their own
-// settings payload.
-func isContentScanExempt(r *http.Request) bool {
-	if r == nil || r.URL == nil {
-		return false
-	}
-	path := r.URL.Path
-	switch {
-	case path == "/healthz", path == "/readyz":
-		return true
-	case path == "/admin", strings.HasPrefix(path, "/admin/"):
-		return true
-	case path == "/webui", strings.HasPrefix(path, "/webui/"):
-		return true
-	case strings.HasPrefix(path, "/static/"), strings.HasPrefix(path, "/assets/"):
-		return true
 	}
 	return false
 }
