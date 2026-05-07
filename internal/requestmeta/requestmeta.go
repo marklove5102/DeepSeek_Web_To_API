@@ -20,6 +20,14 @@ var ConversationIDHeaders = []string{
 	"X-OpenCode-Session-ID",
 	"OpenAI-Conversation-ID",
 	"Anthropic-Conversation-ID",
+	// OpenClaw client family (adopted from cnb openclaw-tunning d8e209c).
+	// Without these the client's per-turn request body still hashes
+	// differently each turn (volatile metadata fields), so prefix-reuse
+	// cannot fire — header pinning is the cheap stable path.
+	"X-OpenClaw-Session-Id",
+	"X-Client-Request-Id",
+	"X-Session-Affinity",
+	"Session-Id",
 }
 
 var conversationIDBodyKeys = map[string]struct{}{
@@ -33,6 +41,10 @@ var conversationIDBodyKeys = map[string]struct{}{
 	"sessionid":       {},
 	"parent_id":       {},
 	"parentid":        {},
+	// OpenClaw body metadata (under `metadata.*`); our recursive walker
+	// already descends into `metadata`, only the key names need adding.
+	"openclaw_session_id": {},
+	"openclawsessionid":   {},
 }
 
 type Metadata struct {

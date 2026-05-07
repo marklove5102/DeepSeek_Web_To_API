@@ -10,13 +10,15 @@ import (
 const sqliteReadAllSummariesQuery = `SELECT
 	id, revision, created_at, updated_at, completed_at, status, caller_id,
 	account_id, request_ip, conversation_id, model, stream, user_input, preview, status_code, elapsed_ms,
-	finish_reason, detail_revision, usage_json
+	finish_reason, detail_revision, usage_json,
+	cif_applied, cif_prefix_hash, cif_prefix_reused, cif_prefix_chars, cif_tail_chars, cif_tail_entries, cif_checkpoint_refresh
 	FROM chat_history ORDER BY updated_at DESC, created_at DESC`
 
 const sqliteReadPageSummariesQuery = `SELECT
 	id, revision, created_at, updated_at, completed_at, status, caller_id,
 	account_id, request_ip, conversation_id, model, stream, user_input, preview, status_code, elapsed_ms,
-	finish_reason, detail_revision, usage_json
+	finish_reason, detail_revision, usage_json,
+	cif_applied, cif_prefix_hash, cif_prefix_reused, cif_prefix_chars, cif_tail_chars, cif_tail_entries, cif_checkpoint_refresh
 	FROM chat_history ORDER BY updated_at DESC, created_at DESC LIMIT ? OFFSET ?`
 
 type sqliteSummaryScanner interface {
@@ -200,6 +202,7 @@ func scanSQLiteSummary(scanner sqliteSummaryScanner) (SummaryEntry, error) {
 	var item SummaryEntry
 	var stream int
 	var usageJSON string
+	var cifApplied, cifReused, cifCheckpoint int
 	if err := scanner.Scan(
 		&item.ID,
 		&item.Revision,
@@ -220,11 +223,21 @@ func scanSQLiteSummary(scanner sqliteSummaryScanner) (SummaryEntry, error) {
 		&item.FinishReason,
 		&item.DetailRevision,
 		&usageJSON,
+		&cifApplied,
+		&item.CurrentInputPrefixHash,
+		&cifReused,
+		&item.CurrentInputPrefixChars,
+		&item.CurrentInputTailChars,
+		&item.CurrentInputTailEntries,
+		&cifCheckpoint,
 	); err != nil {
 		return SummaryEntry{}, fmt.Errorf("scan chat history sqlite summary: %w", err)
 	}
 	item.Stream = stream != 0
 	item.Usage = decodeUsageJSON(usageJSON)
+	item.CurrentInputFileApplied = cifApplied != 0
+	item.CurrentInputPrefixReused = cifReused != 0
+	item.CurrentInputCheckpointRefresh = cifCheckpoint != 0
 	return item, nil
 }
 

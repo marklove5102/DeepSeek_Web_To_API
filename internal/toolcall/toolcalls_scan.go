@@ -239,7 +239,7 @@ func IsPartialToolMarkupTagPrefix(text string) bool {
 		if hasToolMarkupNamePrefix(lower[i:]) {
 			return true
 		}
-		if strings.HasPrefix("dsml", lower[i:]) {
+		if hasToolMarkupDSMLPrefixPrefix(lower[i:]) {
 			return true
 		}
 		next, ok := consumeToolMarkupNamePrefixOnce(lower, text, i, dsmlLike)
@@ -248,6 +248,22 @@ func IsPartialToolMarkupTagPrefix(text string) bool {
 		}
 		dsmlLike = true
 		i = next
+	}
+	return false
+}
+
+// hasToolMarkupDSMLPrefixPrefix reports whether a tail (the partial bytes
+// of an incoming streaming chunk) could still complete to one of the DSML
+// wrapper prefixes the scanner accepts. Streaming SSE chunks may split the
+// `<{:dsml}tool_calls>` marker mid-prefix; the streaming sieve calls this
+// to decide whether to buffer-and-wait vs flush. Adopted from cnb
+// openclaw-tunning f96b883 — adds `{:dsml}` alongside the legacy `dsml`
+// signal so partial-curly-prefix arrivals do not flush prose mid-tag.
+func hasToolMarkupDSMLPrefixPrefix(lowerTail string) bool {
+	for _, prefix := range []string{"dsml", "{:dsml}"} {
+		if strings.HasPrefix(prefix, lowerTail) {
+			return true
+		}
 	}
 	return false
 }
@@ -270,6 +286,9 @@ func consumeToolMarkupNamePrefixOnce(lower, text string, idx int, allowTokenArti
 	}
 	if next, ok := consumeToolMarkupSpaceSeparator(text, idx); ok {
 		return next, true
+	}
+	if strings.HasPrefix(lower[idx:], "{:dsml}") {
+		return idx + len("{:dsml}"), true
 	}
 	if strings.HasPrefix(lower[idx:], "dsml") {
 		return idx + len("dsml"), true

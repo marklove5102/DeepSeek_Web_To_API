@@ -219,7 +219,14 @@ func (s *sqliteStore) initSchemaLocked(tx *sql.Tx) error {
 			usage_json TEXT NOT NULL DEFAULT '',
 			detail_json TEXT NOT NULL DEFAULT '',
 			detail_encoding TEXT NOT NULL DEFAULT '',
-			detail_blob BLOB NOT NULL DEFAULT X''
+			detail_blob BLOB NOT NULL DEFAULT X'',
+			cif_applied INTEGER NOT NULL DEFAULT 0,
+			cif_prefix_hash TEXT NOT NULL DEFAULT '',
+			cif_prefix_reused INTEGER NOT NULL DEFAULT 0,
+			cif_prefix_chars INTEGER NOT NULL DEFAULT 0,
+			cif_tail_chars INTEGER NOT NULL DEFAULT 0,
+			cif_tail_entries INTEGER NOT NULL DEFAULT 0,
+			cif_checkpoint_refresh INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_chat_history_updated_at ON chat_history(updated_at DESC, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_chat_history_status ON chat_history(status)`,
@@ -237,6 +244,17 @@ func (s *sqliteStore) initSchemaLocked(tx *sql.Tx) error {
 		{name: "detail_blob", ddl: `ALTER TABLE chat_history ADD COLUMN detail_blob BLOB NOT NULL DEFAULT X''`},
 		{name: "request_ip", ddl: `ALTER TABLE chat_history ADD COLUMN request_ip TEXT NOT NULL DEFAULT ''`},
 		{name: "conversation_id", ddl: `ALTER TABLE chat_history ADD COLUMN conversation_id TEXT NOT NULL DEFAULT ''`},
+		// CIF prefix-reuse persistence (v1.0.8 follow-up). Existing
+		// production DBs migrate in-place via these ADD COLUMN
+		// statements; defaults are zero so older rows look like "CIF
+		// not applied".
+		{name: "cif_applied", ddl: `ALTER TABLE chat_history ADD COLUMN cif_applied INTEGER NOT NULL DEFAULT 0`},
+		{name: "cif_prefix_hash", ddl: `ALTER TABLE chat_history ADD COLUMN cif_prefix_hash TEXT NOT NULL DEFAULT ''`},
+		{name: "cif_prefix_reused", ddl: `ALTER TABLE chat_history ADD COLUMN cif_prefix_reused INTEGER NOT NULL DEFAULT 0`},
+		{name: "cif_prefix_chars", ddl: `ALTER TABLE chat_history ADD COLUMN cif_prefix_chars INTEGER NOT NULL DEFAULT 0`},
+		{name: "cif_tail_chars", ddl: `ALTER TABLE chat_history ADD COLUMN cif_tail_chars INTEGER NOT NULL DEFAULT 0`},
+		{name: "cif_tail_entries", ddl: `ALTER TABLE chat_history ADD COLUMN cif_tail_entries INTEGER NOT NULL DEFAULT 0`},
+		{name: "cif_checkpoint_refresh", ddl: `ALTER TABLE chat_history ADD COLUMN cif_checkpoint_refresh INTEGER NOT NULL DEFAULT 0`},
 	} {
 		if err := ensureChatHistoryColumnLocked(tx, column); err != nil {
 			return err

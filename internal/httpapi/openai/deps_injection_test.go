@@ -18,6 +18,7 @@ type mockOpenAIConfig struct {
 	historySplitTurns   int
 	currentInputEnabled bool
 	currentInputMin     int
+	remoteFileUpload    *bool
 	thinkingInjection   *bool
 	thinkingPrompt      string
 }
@@ -46,7 +47,12 @@ func (m mockOpenAIConfig) HistorySplitTriggerAfterTurns() int {
 	return m.historySplitTurns
 }
 func (m mockOpenAIConfig) CurrentInputFileEnabled() bool { return m.currentInputEnabled }
-func (m mockOpenAIConfig) RemoteFileUploadEnabled() bool { return true }
+func (m mockOpenAIConfig) RemoteFileUploadEnabled() bool {
+	if m.remoteFileUpload == nil {
+		return true
+	}
+	return *m.remoteFileUpload
+}
 func (m mockOpenAIConfig) CurrentInputFileMinChars() int {
 	return m.currentInputMin
 }

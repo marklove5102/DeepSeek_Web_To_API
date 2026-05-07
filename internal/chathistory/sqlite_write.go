@@ -122,6 +122,16 @@ func (s *sqliteStore) Update(id string, params UpdateParams) (Entry, error) {
 	if params.Completed {
 		item.CompletedAt = now
 	}
+	if params.CurrentInput != nil {
+		ci := params.CurrentInput
+		item.CurrentInputFileApplied = ci.FileApplied
+		item.CurrentInputPrefixHash = strings.TrimSpace(ci.PrefixHash)
+		item.CurrentInputPrefixReused = ci.PrefixReused
+		item.CurrentInputPrefixChars = ci.PrefixChars
+		item.CurrentInputTailChars = ci.TailChars
+		item.CurrentInputTailEntries = ci.TailEntries
+		item.CurrentInputCheckpointRefresh = ci.CheckpointRefresh
+	}
 	if err := s.upsertEntryLocked(tx, item); err != nil {
 		return Entry{}, err
 	}
@@ -262,8 +272,9 @@ func (s *sqliteStore) upsertEntryLocked(tx *sql.Tx, item Entry) error {
 		`INSERT INTO chat_history (
 			id, revision, created_at, updated_at, completed_at, status, caller_id,
 			account_id, request_ip, conversation_id, model, stream, user_input, preview, status_code, elapsed_ms,
-			finish_reason, detail_revision, usage_json, detail_json, detail_encoding, detail_blob
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			finish_reason, detail_revision, usage_json, detail_json, detail_encoding, detail_blob,
+			cif_applied, cif_prefix_hash, cif_prefix_reused, cif_prefix_chars, cif_tail_chars, cif_tail_entries, cif_checkpoint_refresh
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			revision = excluded.revision,
 			created_at = excluded.created_at,
@@ -285,7 +296,14 @@ func (s *sqliteStore) upsertEntryLocked(tx *sql.Tx, item Entry) error {
 			usage_json = excluded.usage_json,
 			detail_json = excluded.detail_json,
 			detail_encoding = excluded.detail_encoding,
-			detail_blob = excluded.detail_blob`,
+			detail_blob = excluded.detail_blob,
+			cif_applied = excluded.cif_applied,
+			cif_prefix_hash = excluded.cif_prefix_hash,
+			cif_prefix_reused = excluded.cif_prefix_reused,
+			cif_prefix_chars = excluded.cif_prefix_chars,
+			cif_tail_chars = excluded.cif_tail_chars,
+			cif_tail_entries = excluded.cif_tail_entries,
+			cif_checkpoint_refresh = excluded.cif_checkpoint_refresh`,
 		summary.ID,
 		summary.Revision,
 		summary.CreatedAt,
@@ -308,6 +326,13 @@ func (s *sqliteStore) upsertEntryLocked(tx *sql.Tx, item Entry) error {
 		detailJSON,
 		detailEncoding,
 		detailBlob,
+		boolToSQLiteInt(summary.CurrentInputFileApplied),
+		summary.CurrentInputPrefixHash,
+		boolToSQLiteInt(summary.CurrentInputPrefixReused),
+		summary.CurrentInputPrefixChars,
+		summary.CurrentInputTailChars,
+		summary.CurrentInputTailEntries,
+		boolToSQLiteInt(summary.CurrentInputCheckpointRefresh),
 	)
 	if err != nil {
 		return fmt.Errorf("write chat history sqlite row: %w", err)

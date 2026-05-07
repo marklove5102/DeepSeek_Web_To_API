@@ -1,7 +1,9 @@
 package promptcompat
 
 import (
+	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -11,7 +13,7 @@ const historyTranscriptTitle = "# DEEPSEEK_WEB_TO_API_HISTORY.txt"
 const historyTranscriptSummary = "Prior conversation history and tool progress."
 
 func BuildOpenAIHistoryTranscript(messages []any) string {
-	return buildOpenAIHistoryTranscript(messages)
+	return buildOpenAIHistoryTranscript(messages, false)
 }
 
 func BuildOpenAICurrentUserInputTranscript(text string) string {
@@ -20,14 +22,21 @@ func BuildOpenAICurrentUserInputTranscript(text string) string {
 	}
 	return buildOpenAIHistoryTranscript([]any{
 		map[string]any{"role": "user", "content": text},
-	})
+	}, false)
 }
 
+// BuildOpenAICurrentInputContextTranscript renders a transcript intended for
+// upload as the CIF (current input file). Volatile per-turn metadata fields
+// (message_id / timestamp / timestamp_ms inside an "untrusted metadata" JSON
+// fence) are canonicalized so a stable prefix of the transcript is byte-for-
+// byte identical across turns. Without this, prefix-reuse cache keys would
+// break every single turn for clients (notably OpenClaw) that inject those
+// fields into every message.
 func BuildOpenAICurrentInputContextTranscript(messages []any) string {
-	return buildOpenAIHistoryTranscript(messages)
+	return buildOpenAIHistoryTranscript(messages, true)
 }
 
-func buildOpenAIHistoryTranscript(messages []any) string {
+func buildOpenAIHistoryTranscript(messages []any, canonicalizeVolatileMetadata bool) string {
 	if len(messages) == 0 {
 		return ""
 	}
@@ -44,7 +53,7 @@ func buildOpenAIHistoryTranscript(messages []any) string {
 			continue
 		}
 		role := normalizeOpenAIRoleForPrompt(strings.ToLower(strings.TrimSpace(asString(msg["role"]))))
-		content := strings.TrimSpace(buildOpenAIHistoryEntry(role, msg))
+		content := strings.TrimSpace(buildOpenAIHistoryEntry(role, msg, canonicalizeVolatileMetadata))
 		if content == "" {
 			continue
 		}
@@ -59,16 +68,76 @@ func buildOpenAIHistoryTranscript(messages []any) string {
 	return transcript + "\n"
 }
 
-func buildOpenAIHistoryEntry(role string, msg map[string]any) string {
+func buildOpenAIHistoryEntry(role string, msg map[string]any, canonicalizeVolatileMetadata bool) string {
+	var content string
 	switch role {
 	case "assistant":
-		return strings.TrimSpace(buildAssistantContentForPrompt(msg))
+		content = buildAssistantContentForPrompt(msg)
 	case "tool", "function":
-		return strings.TrimSpace(buildToolHistoryContent(msg))
+		content = buildToolHistoryContent(msg)
 	case "system", "user":
-		return strings.TrimSpace(NormalizeOpenAIContentForPrompt(msg["content"]))
+		content = NormalizeOpenAIContentForPrompt(msg["content"])
 	default:
-		return strings.TrimSpace(NormalizeOpenAIContentForPrompt(msg["content"]))
+		content = NormalizeOpenAIContentForPrompt(msg["content"])
+	}
+	content = strings.TrimSpace(content)
+	if canonicalizeVolatileMetadata {
+		content = strings.TrimSpace(canonicalizeVolatileTranscriptText(content))
+	}
+	return content
+}
+
+// volatileMetadataBlockRE finds OpenClaw-style "untrusted metadata" JSON
+// fences emitted in either Conversation or Sender shape. The fence wraps a
+// JSON object that carries message_id / timestamp / timestamp_ms fields
+// regenerated every turn — those fields would otherwise be the only diff
+// between two turns of an otherwise-identical transcript prefix, defeating
+// any prefix-based reuse cache.
+var volatileMetadataBlockRE = regexp.MustCompile(`(?s)((?:Conversation info|Sender) \(untrusted metadata\):\s*` + "```" + `json\s*\n?)(.*?)(\n?` + "```" + `)`)
+
+func canonicalizeVolatileTranscriptText(text string) string {
+	if text == "" || !strings.Contains(text, "untrusted metadata") {
+		return text
+	}
+	return volatileMetadataBlockRE.ReplaceAllStringFunc(text, func(block string) string {
+		matches := volatileMetadataBlockRE.FindStringSubmatch(block)
+		if len(matches) != 4 {
+			return block
+		}
+		cleaned, ok := canonicalizeMetadataJSON(matches[2])
+		if !ok {
+			return block
+		}
+		return matches[1] + cleaned + matches[3]
+	})
+}
+
+func canonicalizeMetadataJSON(raw string) (string, bool) {
+	var value any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &value); err != nil {
+		return "", false
+	}
+	stripVolatileMetadataFields(value)
+	b, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
+}
+
+func stripVolatileMetadataFields(value any) {
+	switch x := value.(type) {
+	case map[string]any:
+		delete(x, "message_id")
+		delete(x, "timestamp")
+		delete(x, "timestamp_ms")
+		for _, child := range x {
+			stripVolatileMetadataFields(child)
+		}
+	case []any:
+		for _, child := range x {
+			stripVolatileMetadataFields(child)
+		}
 	}
 }
 

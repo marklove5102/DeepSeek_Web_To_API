@@ -3,25 +3,31 @@ package promptcompat
 import "DeepSeek_Web_To_API/internal/config"
 
 type StandardRequest struct {
-	Surface                 string
-	RequestedModel          string
-	ResolvedModel           string
-	ResponseModel           string
-	Messages                []any
-	HistoryText             string
-	PromptTokenText         string
-	CurrentInputFileApplied bool
-	ToolsRaw                any
-	FinalPrompt             string
-	ToolNames               []string
-	ToolChoice              ToolChoicePolicy
-	Stream                  bool
-	Thinking                bool
-	ExposeReasoning         bool
-	Search                  bool
-	RefFileIDs              []string
-	RefFileTokens           int
-	PassThrough             map[string]any
+	Surface                       string
+	RequestedModel                string
+	ResolvedModel                 string
+	ResponseModel                 string
+	Messages                      []any
+	HistoryText                   string
+	PromptTokenText               string
+	CurrentInputFileApplied       bool
+	CurrentInputPrefixHash        string // hex sha256[:16] of the cached prefix transcript when applied
+	CurrentInputPrefixReused      bool   // true when the prefix-cache hit reused a prior file_id (no upload)
+	CurrentInputPrefixChars       int    // size of the cached/uploaded prefix portion in bytes
+	CurrentInputTailChars         int    // size of the freshly-included tail (newest turns since last prefix snap)
+	CurrentInputTailEntries       int    // number of role-blocks in the tail (parsed via `\n=== ` markers)
+	CurrentInputCheckpointRefresh bool   // first turn or prefix-string mismatch — a fresh prefix was uploaded
+	ToolsRaw                      any
+	FinalPrompt                   string
+	ToolNames                     []string
+	ToolChoice                    ToolChoicePolicy
+	Stream                        bool
+	Thinking                      bool
+	ExposeReasoning               bool
+	Search                        bool
+	RefFileIDs                    []string
+	RefFileTokens                 int
+	PassThrough                   map[string]any
 }
 
 type ToolChoiceMode string

@@ -129,6 +129,29 @@ func (s *chatHistorySession) updateHistoryText(historyText string) {
 	})
 }
 
+// updateCurrentInputState pushes the post-CIF state from stdReq into the
+// persisted chat_history row. Called from the chat / responses handlers
+// right after applyCurrentInputFile returns. The fields are mirrored to
+// dedicated SQLite columns (cif_*) so simple SQL queries can derive
+// trigger / reuse rates without admin auth or detail_blob decoding.
+func (s *chatHistorySession) updateCurrentInputState(stdReq promptcompat.StandardRequest) {
+	if s == nil || s.store == nil || s.disabled {
+		return
+	}
+	s.persistUpdate(chathistory.UpdateParams{
+		ElapsedMs: time.Since(s.startedAt).Milliseconds(),
+		CurrentInput: &chathistory.CurrentInputUpdate{
+			FileApplied:       stdReq.CurrentInputFileApplied,
+			PrefixHash:        stdReq.CurrentInputPrefixHash,
+			PrefixReused:      stdReq.CurrentInputPrefixReused,
+			PrefixChars:       stdReq.CurrentInputPrefixChars,
+			TailChars:         stdReq.CurrentInputTailChars,
+			TailEntries:       stdReq.CurrentInputTailEntries,
+			CheckpointRefresh: stdReq.CurrentInputCheckpointRefresh,
+		},
+	})
+}
+
 func extractSingleUserInput(messages []any) string {
 	for i := len(messages) - 1; i >= 0; i-- {
 		msg, ok := messages[i].(map[string]any)

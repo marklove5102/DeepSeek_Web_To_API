@@ -20,47 +20,46 @@ const (
 	currentInputPurpose     = "assistants"
 )
 
+// ApplyCurrentInputFile decides whether the request's full transcript should
+// be packed into the DEEPSEEK_WEB_TO_API_HISTORY.txt file (or inlined) and
+// rewrites the StandardRequest accordingly. Three execution modes after the
+// trigger threshold check:
+//
+//   - inline (RemoteFileUpload disabled): paste the entire transcript as the
+//     user message body — no upstream file API roundtrip, but no caching
+//     either; suitable for low-volume operators paying per-request rate
+//     limits on upload_file.
+//   - prefix-reuse (default, multi-turn): split the transcript into a stable
+//     prefix + recent tail, upload the prefix once, reuse its file_id on
+//     subsequent turns, send the tail as the live user message. Adopted
+//     from cnb openclaw-tunning d8e209c — closes Issue-style "long-context
+//     latency degraded over time" cases without depending on undocumented
+//     upstream session protocol.
+//   - full-file (single-turn or prefix-cache miss): upload the entire
+//     transcript fresh and reference it as a single file_id; the prefix
+//     state is updated for the next turn.
 func (s Service) ApplyCurrentInputFile(ctx context.Context, a *auth.RequestAuth, stdReq promptcompat.StandardRequest) (promptcompat.StandardRequest, error) {
 	if s.DS == nil || s.Store == nil || a == nil || !s.Store.CurrentInputFileEnabled() {
 		return stdReq, nil
 	}
 	threshold := s.Store.CurrentInputFileMinChars()
 
-	index, text := latestUserInputForFile(stdReq.Messages)
+	index, latestUserText := latestUserInputForFile(stdReq.Messages)
 	if index < 0 {
-		return stdReq, nil
-	}
-	if len([]rune(text)) < threshold {
 		return stdReq, nil
 	}
 	fileText := promptcompat.BuildOpenAICurrentInputContextTranscript(stdReq.Messages)
 	if strings.TrimSpace(fileText) == "" {
 		return stdReq, errors.New("current user input file produced empty transcript")
 	}
-
-	if !s.Store.RemoteFileUploadEnabled() {
-		// Inline the transcript directly into the conversation rather than
-		// uploading it to DeepSeek's file API. The upstream upload_file
-		// endpoint is heavily rate-limited per account ("rate limit
-		// reached"), and on busy multi-turn workloads this single feature
-		// was the dominant cause of the production failure rate. We now
-		// feed the full transcript as the user message body so the model
-		// still sees the entire context window without hitting upload_file
-		// at all. Operators can opt back into uploading via env
-		// DEEPSEEK_WEB_TO_API_REMOTE_FILE_UPLOAD_ENABLED=true.
-		inlinedContent := fileText + "\n\n---\n\n" + currentInputFileInlinePrompt()
-		messages := []any{
-			map[string]any{
-				"role":    "user",
-				"content": inlinedContent,
-			},
-		}
-		stdReq.Messages = messages
-		stdReq.HistoryText = fileText
-		stdReq.CurrentInputFileApplied = true
-		stdReq.FinalPrompt, stdReq.ToolNames = promptcompat.BuildOpenAIPrompt(messages, stdReq.ToolsRaw, "", stdReq.ToolChoice, stdReq.Thinking)
-		stdReq.RefFileTokens += util.CountPromptTokens(fileText, stdReq.ResponseModel)
-		stdReq.PromptTokenText = stdReq.FinalPrompt
+	// Trigger on either a long latest user message or a large accumulated
+	// prompt. Real OpenClaw turns often have a short latest user request plus
+	// a very large prior context; keeping that history inline can make
+	// DeepSeek Web return an empty stream for V4 Pro. Uploading the full
+	// transcript as the current-input file keeps the live prompt small while
+	// preserving context.
+	largeAccumulatedPrompt := len(stdReq.Messages) > 1 && len([]rune(stdReq.FinalPrompt)) >= threshold
+	if len([]rune(latestUserText)) < threshold && !largeAccumulatedPrompt {
 		return stdReq, nil
 	}
 
@@ -68,19 +67,60 @@ func (s Service) ApplyCurrentInputFile(ctx context.Context, a *auth.RequestAuth,
 	if resolvedType, ok := config.GetModelType(stdReq.ResolvedModel); ok {
 		modelType = resolvedType
 	}
-	result, err := s.DS.UploadFile(ctx, a, dsclient.UploadFileRequest{
-		Filename:    currentInputFilename,
-		ContentType: currentInputContentType,
-		Purpose:     currentInputPurpose,
-		ModelType:   modelType,
-		Data:        []byte(fileText),
-	}, 3)
-	if err != nil {
-		return stdReq, fmt.Errorf("upload current user input file: %w", err)
+
+	if !s.Store.RemoteFileUploadEnabled() {
+		// Inline mode (our v1.0.3+ default). The upstream upload_file
+		// endpoint is heavily rate-limited per account, so we keep the
+		// transcript inside the user message body instead of uploading
+		// it. We still try the prefix-aware path first — even without
+		// file_id reuse, a byte-stable prefix lets upstream's prompt KV
+		// cache (if any) hit on the leading bytes, and the structural
+		// "stable vs recent" boundary in the message body gives the
+		// model a clearer signal about what's new this turn. Only when
+		// the transcript is too short to split, or the session key is
+		// missing, do we fall back to the legacy whole-transcript inline
+		// shape.
+		if out, ok := s.applyCurrentInputInlinePrefix(a, stdReq, fileText, modelType); ok {
+			return out, nil
+		}
+		return s.applyCurrentInputInlineFull(stdReq, fileText), nil
 	}
-	fileID := strings.TrimSpace(result.ID)
-	if fileID == "" {
-		return stdReq, errors.New("upload current user input file returned empty file id")
+
+	if out, ok, err := s.applyCurrentInputStablePrefix(ctx, a, stdReq, fileText, modelType); err != nil || ok {
+		return out, err
+	}
+	return s.applyCurrentInputFullFile(ctx, a, stdReq, fileText, modelType)
+}
+
+// applyCurrentInputInlineFull is the legacy whole-transcript inline shape
+// kept as the fallback when prefix-aware split is not possible (small
+// transcript, missing session key, etc.). The transcript goes inline as a
+// single user message body terminated by the legacy instruction prompt —
+// no file upload, no prefix tracking.
+func (s Service) applyCurrentInputInlineFull(stdReq promptcompat.StandardRequest, fileText string) promptcompat.StandardRequest {
+	inlinedContent := fileText + "\n\n---\n\n" + currentInputFileInlinePrompt()
+	messages := []any{
+		map[string]any{
+			"role":    "user",
+			"content": inlinedContent,
+		},
+	}
+	stdReq.Messages = messages
+	stdReq.HistoryText = fileText
+	stdReq.CurrentInputFileApplied = true
+	stdReq.CurrentInputPrefixHash = currentInputTextHash(fileText)
+	stdReq.CurrentInputPrefixChars = len(fileText)
+	stdReq.CurrentInputCheckpointRefresh = true
+	stdReq.FinalPrompt, stdReq.ToolNames = promptcompat.BuildOpenAIPrompt(messages, stdReq.ToolsRaw, "", stdReq.ToolChoice, stdReq.Thinking)
+	stdReq.RefFileTokens += util.CountPromptTokens(fileText, stdReq.ResponseModel)
+	stdReq.PromptTokenText = stdReq.FinalPrompt
+	return stdReq
+}
+
+func (s Service) applyCurrentInputFullFile(ctx context.Context, a *auth.RequestAuth, stdReq promptcompat.StandardRequest, fileText, modelType string) (promptcompat.StandardRequest, error) {
+	fileID, err := s.uploadCurrentInputFile(ctx, a, fileText, modelType)
+	if err != nil {
+		return stdReq, err
 	}
 
 	messages := []any{
@@ -93,11 +133,32 @@ func (s Service) ApplyCurrentInputFile(ctx context.Context, a *auth.RequestAuth,
 	stdReq.Messages = messages
 	stdReq.HistoryText = fileText
 	stdReq.CurrentInputFileApplied = true
+	stdReq.CurrentInputPrefixHash = currentInputTextHash(fileText)
+	stdReq.CurrentInputPrefixChars = len(fileText)
+	stdReq.CurrentInputCheckpointRefresh = true
 	stdReq.RefFileIDs = prependUniqueRefFileID(stdReq.RefFileIDs, fileID)
 	stdReq.FinalPrompt, stdReq.ToolNames = promptcompat.BuildOpenAIPrompt(messages, stdReq.ToolsRaw, "", stdReq.ToolChoice, stdReq.Thinking)
 	stdReq.RefFileTokens += util.CountPromptTokens(fileText, stdReq.ResponseModel)
 	stdReq.PromptTokenText = fileText + "\n" + stdReq.FinalPrompt
 	return stdReq, nil
+}
+
+func (s Service) uploadCurrentInputFile(ctx context.Context, a *auth.RequestAuth, fileText, modelType string) (string, error) {
+	result, err := s.DS.UploadFile(ctx, a, dsclient.UploadFileRequest{
+		Filename:    currentInputFilename,
+		ContentType: currentInputContentType,
+		Purpose:     currentInputPurpose,
+		ModelType:   modelType,
+		Data:        []byte(fileText),
+	}, 3)
+	if err != nil {
+		return "", fmt.Errorf("upload current user input file: %w", err)
+	}
+	fileID := strings.TrimSpace(result.ID)
+	if fileID == "" {
+		return "", errors.New("upload current user input file returned empty file id")
+	}
+	return fileID, nil
 }
 
 func latestUserInputForFile(messages []any) (int, string) {

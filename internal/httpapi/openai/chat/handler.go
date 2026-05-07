@@ -36,7 +36,15 @@ func (h *Handler) applyCurrentInputFile(ctx context.Context, a *auth.RequestAuth
 	if h == nil {
 		return stdReq, nil
 	}
-	if shared.CurrentInputFileSkipped(ctx) {
+	// CurrentInputFileSkipped is set by Claude/Gemini proxies that bridge
+	// into /v1/chat/completions. Historically it suppressed the entire CIF
+	// path because the only CIF mode (file upload) hit DeepSeek's heavily-
+	// rate-limited upload_file endpoint. With v1.0.7 inline-prefix mode
+	// (RemoteFileUpload disabled) there is no upload at all — only a
+	// structural rewrite of the user message body — so the original
+	// "skip to avoid rate limits" reason no longer applies. Only honor
+	// the skip flag when file-upload mode is actually configured.
+	if shared.CurrentInputFileSkipped(ctx) && h.Store != nil && h.Store.RemoteFileUploadEnabled() {
 		return stdReq, nil
 	}
 	svc := history.Service{Store: h.Store, DS: h.DS}

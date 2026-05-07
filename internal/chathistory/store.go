@@ -60,6 +60,17 @@ type Entry struct {
 	ElapsedMs        int64          `json:"elapsed_ms,omitempty"`
 	FinishReason     string         `json:"finish_reason,omitempty"`
 	Usage            map[string]any `json:"usage,omitempty"`
+	// CIF (current input file) prefix-reuse state, mirrored from
+	// promptcompat.StandardRequest after applyCurrentInputFile runs. Set
+	// once per request via UpdateCurrentInputState; null/zero on rows
+	// where CIF did not run.
+	CurrentInputFileApplied       bool   `json:"current_input_file_applied,omitempty"`
+	CurrentInputPrefixHash        string `json:"current_input_prefix_hash,omitempty"`
+	CurrentInputPrefixReused      bool   `json:"current_input_prefix_reused,omitempty"`
+	CurrentInputPrefixChars       int    `json:"current_input_prefix_chars,omitempty"`
+	CurrentInputTailChars         int    `json:"current_input_tail_chars,omitempty"`
+	CurrentInputTailEntries       int    `json:"current_input_tail_entries,omitempty"`
+	CurrentInputCheckpointRefresh bool   `json:"current_input_checkpoint_refresh,omitempty"`
 }
 
 type Message struct {
@@ -87,6 +98,16 @@ type SummaryEntry struct {
 	FinishReason   string         `json:"finish_reason,omitempty"`
 	DetailRevision int64          `json:"detail_revision"`
 	Usage          map[string]any `json:"usage,omitempty"`
+	// CIF state, kept in the summary row so simple `sqlite3` queries can
+	// derive trigger / reuse rates without decoding detail_blob. See Entry
+	// for field definitions.
+	CurrentInputFileApplied       bool   `json:"current_input_file_applied,omitempty"`
+	CurrentInputPrefixHash        string `json:"current_input_prefix_hash,omitempty"`
+	CurrentInputPrefixReused      bool   `json:"current_input_prefix_reused,omitempty"`
+	CurrentInputPrefixChars       int    `json:"current_input_prefix_chars,omitempty"`
+	CurrentInputTailChars         int    `json:"current_input_tail_chars,omitempty"`
+	CurrentInputTailEntries       int    `json:"current_input_tail_entries,omitempty"`
+	CurrentInputCheckpointRefresh bool   `json:"current_input_checkpoint_refresh,omitempty"`
 }
 
 type File struct {
@@ -123,6 +144,22 @@ type UpdateParams struct {
 	FinishReason     string
 	Usage            map[string]any
 	Completed        bool
+	// CIF state — non-nil pointer signals the writer should overwrite the
+	// stored CIF fields. nil leaves them untouched (so partial UpdateParams
+	// from non-CIF callers don't accidentally clear the state).
+	CurrentInput *CurrentInputUpdate
+}
+
+// CurrentInputUpdate carries the CIF mode + sizing fields captured from
+// promptcompat.StandardRequest after applyCurrentInputFile runs.
+type CurrentInputUpdate struct {
+	FileApplied       bool
+	PrefixHash        string
+	PrefixReused      bool
+	PrefixChars       int
+	TailChars         int
+	TailEntries       int
+	CheckpointRefresh bool
 }
 
 type detailEnvelope struct {
@@ -452,6 +489,16 @@ func (s *Store) Update(id string, params UpdateParams) (Entry, error) {
 	}
 	item.Error = strings.TrimSpace(params.Error)
 	item.StatusCode = params.StatusCode
+	if params.CurrentInput != nil {
+		ci := params.CurrentInput
+		item.CurrentInputFileApplied = ci.FileApplied
+		item.CurrentInputPrefixHash = strings.TrimSpace(ci.PrefixHash)
+		item.CurrentInputPrefixReused = ci.PrefixReused
+		item.CurrentInputPrefixChars = ci.PrefixChars
+		item.CurrentInputTailChars = ci.TailChars
+		item.CurrentInputTailEntries = ci.TailEntries
+		item.CurrentInputCheckpointRefresh = ci.CheckpointRefresh
+	}
 	item.ElapsedMs = params.ElapsedMs
 	item.FinishReason = strings.TrimSpace(params.FinishReason)
 	if params.Usage != nil {
@@ -758,25 +805,32 @@ func (s *Store) nextRevisionLocked() int64 {
 
 func summaryFromEntry(item Entry) SummaryEntry {
 	return SummaryEntry{
-		ID:             item.ID,
-		Revision:       item.Revision,
-		CreatedAt:      item.CreatedAt,
-		UpdatedAt:      item.UpdatedAt,
-		CompletedAt:    item.CompletedAt,
-		Status:         item.Status,
-		CallerID:       item.CallerID,
-		AccountID:      item.AccountID,
-		RequestIP:      item.RequestIP,
-		ConversationID: item.ConversationID,
-		Model:          item.Model,
-		Stream:         item.Stream,
-		UserInput:      item.UserInput,
-		Preview:        buildPreview(item),
-		StatusCode:     item.StatusCode,
-		ElapsedMs:      item.ElapsedMs,
-		FinishReason:   item.FinishReason,
-		DetailRevision: item.Revision,
-		Usage:          cloneMap(item.Usage),
+		ID:                            item.ID,
+		Revision:                      item.Revision,
+		CreatedAt:                     item.CreatedAt,
+		UpdatedAt:                     item.UpdatedAt,
+		CompletedAt:                   item.CompletedAt,
+		Status:                        item.Status,
+		CallerID:                      item.CallerID,
+		AccountID:                     item.AccountID,
+		RequestIP:                     item.RequestIP,
+		ConversationID:                item.ConversationID,
+		Model:                         item.Model,
+		Stream:                        item.Stream,
+		UserInput:                     item.UserInput,
+		Preview:                       buildPreview(item),
+		StatusCode:                    item.StatusCode,
+		ElapsedMs:                     item.ElapsedMs,
+		FinishReason:                  item.FinishReason,
+		DetailRevision:                item.Revision,
+		Usage:                         cloneMap(item.Usage),
+		CurrentInputFileApplied:       item.CurrentInputFileApplied,
+		CurrentInputPrefixHash:        item.CurrentInputPrefixHash,
+		CurrentInputPrefixReused:      item.CurrentInputPrefixReused,
+		CurrentInputPrefixChars:       item.CurrentInputPrefixChars,
+		CurrentInputTailChars:         item.CurrentInputTailChars,
+		CurrentInputTailEntries:       item.CurrentInputTailEntries,
+		CurrentInputCheckpointRefresh: item.CurrentInputCheckpointRefresh,
 	}
 }
 

@@ -7,10 +7,16 @@ func normalizeDSMLToolCallMarkup(text string) (string, bool) {
 		return "", true
 	}
 	hasAliasLikeMarkup, _ := ContainsToolMarkupSyntaxOutsideIgnored(text)
-	if !hasAliasLikeMarkup {
-		return text, true
+	if hasAliasLikeMarkup {
+		text = rewriteDSMLToolMarkupOutsideIgnored(text)
 	}
-	return rewriteDSMLToolMarkupOutsideIgnored(text), true
+	// Tolerant regex pass for DSML variants the char-by-char scanner did
+	// not recognize (e.g. `<DSML.tool_calls>`, `<|DSML : tool_calls|>`,
+	// `<dsml::tool_calls>`). Only paired open+close tags get rewritten —
+	// orphans stay verbatim so this pass can never fabricate a tool_calls
+	// block out of arbitrary content.
+	text = rewriteDSMLToolMarkupOutsideIgnoredRegex(text)
+	return text, true
 }
 
 func rewriteDSMLToolMarkupOutsideIgnored(text string) string {

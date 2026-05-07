@@ -95,7 +95,9 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stdReq = shared.ApplyThinkingInjection(h.Store, stdReq)
+	cifStartedAt := time.Now()
 	stdReq, err = h.applyCurrentInputFile(r.Context(), a, stdReq)
+	cifDuration := time.Since(cifStartedAt)
 	if err != nil {
 		status, message := mapCurrentInputFileError(err)
 		if historySession != nil {
@@ -104,8 +106,10 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, status, message)
 		return
 	}
+	recordCurrentInputMetrics(stdReq, cifDuration)
 	if historySession != nil {
 		historySession.updateHistoryText(stdReq.HistoryText)
+		historySession.updateCurrentInputState(stdReq)
 	}
 
 	sessionID, err = h.DS.CreateSession(r.Context(), a, 3)

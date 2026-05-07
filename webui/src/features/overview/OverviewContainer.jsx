@@ -1,4 +1,4 @@
-import { Activity, ArrowDown, ArrowUp, CalendarDays, Cpu, Database, DollarSign, Gauge, HardDrive, History, MemoryStick, RadioTower, Server, Sparkles, Zap } from 'lucide-react'
+import { Activity, ArrowDown, ArrowUp, CalendarDays, Cpu, Database, DollarSign, Gauge, HardDrive, History, Hourglass, Layers, MemoryStick, RadioTower, RefreshCw, Server, Sparkles, Zap } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import clsx from 'clsx'
 
@@ -86,6 +86,13 @@ function formatBytes(value) {
 
 function formatBandwidth(value) {
     return `${formatBytes(value)}/s`
+}
+
+function formatMs(value) {
+    const n = Number(value) || 0
+    if (n <= 0) return '-'
+    if (n < 1000) return `${Math.round(n)}ms`
+    return `${(n / 1000).toFixed(n < 10000 ? 2 : 1)}s`
 }
 
 function tokenWindowTotals(metrics, key) {
@@ -367,6 +374,25 @@ export default function OverviewContainer({ config, authFetch, onMessage }) {
     const hostBandwidth = host.bandwidth || {}
     const windowSeconds = Number(metrics.window_seconds) || 60
 
+    // Current-input prefix-reuse pipeline (v1.0.7+ inline-prefix mode).
+    // Snapshot shape comes from internal/currentinputmetrics/metrics.go and
+    // is exposed under metrics.current_input_prefix in the admin overview.
+    const cifPrefix = metrics.current_input_prefix || {}
+    const cifTotalSeen = Number(cifPrefix.total_seen) || 0
+    const cifApplied = Number(cifPrefix.applied) || 0
+    const cifTriggerRate = Number(cifPrefix.trigger_rate) || (cifTotalSeen > 0 ? (cifApplied * 100) / cifTotalSeen : 0)
+    const cifReused = Number(cifPrefix.reused) || 0
+    const cifRefreshes = Number(cifPrefix.refreshes) || 0
+    const cifFallback = Number(cifPrefix.fallback_full_uploads) || 0
+    const cifReuseRate = Number(cifPrefix.reuse_rate) || (cifApplied > 0 ? (cifReused * 100) / cifApplied : 0)
+    const cifActive = Number(cifPrefix.active_states) || 0
+    const cifTailAvg = Number(cifPrefix.tail_chars_avg) || 0
+    const cifTailP95 = Number(cifPrefix.tail_chars_p95) || 0
+    const cifTailEntriesAvg = Number(cifPrefix.tail_entries_avg) || 0
+    const cifMsAvg = Number(cifPrefix.current_input_file_ms_avg) || 0
+    const cifMsReused = Number(cifPrefix.current_input_file_ms_reused_avg) || 0
+    const cifMsRefresh = Number(cifPrefix.current_input_file_ms_refresh_avg) || 0
+
     return (
         <div className="overview-grid space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
@@ -383,6 +409,40 @@ export default function OverviewContainer({ config, authFetch, onMessage }) {
                 <MetricCard icon={Gauge} label="负载状态" value={formatRate(hostLoad.load1)} hint={`5m ${formatRate(hostLoad.load5)} / 15m ${formatRate(hostLoad.load15)} · ${loadStatusLabel(hostLoad.status)}`} />
                 <MetricCard icon={ArrowUp} label="带宽上行" value={formatBandwidth(hostBandwidth.tx_bytes_per_sec)} hint={`累计 ${formatBytes(hostBandwidth.tx_total_bytes)}`} tone="cyan" />
                 <MetricCard icon={ArrowDown} label="带宽下行" value={formatBandwidth(hostBandwidth.rx_bytes_per_sec)} hint={`累计 ${formatBytes(hostBandwidth.rx_total_bytes)}`} tone="emerald" />
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+                <MetricCard
+                    icon={RefreshCw}
+                    label="PREFIX 复用率"
+                    value={cifApplied > 0 ? formatPercent(cifReuseRate) : '-'}
+                    hint={`${formatNumber(cifReused)}/${formatNumber(cifApplied)} applied · ${formatNumber(cifActive)} active · 触发率 ${formatPercent(cifTriggerRate)}（${formatNumber(cifApplied)}/${formatNumber(cifTotalSeen)}）`}
+                    tone="emerald"
+                />
+                <MetricCard
+                    icon={RadioTower}
+                    label="CHECKPOINT 刷新"
+                    value={formatNumber(cifRefreshes)}
+                    hint={`${formatNumber(cifFallback)} 次 full upload fallback · 总请求 ${formatNumber(cifTotalSeen)}`}
+                />
+                <MetricCard
+                    icon={Layers}
+                    label="TAIL 大小"
+                    value={cifApplied > 0 ? formatBytes(cifTailAvg) : '-'}
+                    hint={cifApplied > 0
+                        ? `p95 ${formatBytes(cifTailP95)} · inline rolling tail`
+                        : `inline rolling tail · 等待样本`}
+                    tone="cyan"
+                />
+                <MetricCard
+                    icon={Hourglass}
+                    label="CURRENT INPUT 耗时"
+                    value={cifApplied > 0 ? formatMs(cifMsAvg) : '-'}
+                    hint={cifApplied > 0
+                        ? `reuse ${formatMs(cifMsReused)} / refresh ${formatMs(cifMsRefresh)}`
+                        : `applyCurrentInputFile 阶段耗时`}
+                    tone="amber"
+                />
             </div>
 
             <div className="ops-panel p-4">

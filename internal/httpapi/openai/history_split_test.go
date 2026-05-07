@@ -859,3 +859,231 @@ func defaultToolChoicePolicy() promptcompat.ToolChoicePolicy {
 func boolPtr(v bool) *bool {
 	return &v
 }
+
+// makeLargeInlineMessages produces a message slice whose transcript form is
+// at least `targetBytes` long — enough for splitCurrentInputPrefixTail to
+// pick a clean cut point. The first user message ("seed user request")
+// satisfies the latest-user threshold trigger; the synthetic assistant
+// blob carries the bulk so the prefix grows past the 32 KB target.
+func makeLargeInlineMessages(targetBytes int) []any {
+	bigBlob := strings.Repeat("0123456789abcdef ", targetBytes/16+8)
+	return []any{
+		map[string]any{"role": "system", "content": "you are a tester"},
+		map[string]any{"role": "user", "content": "seed user request " + strings.Repeat("x", 200)},
+		map[string]any{"role": "assistant", "content": bigBlob},
+		map[string]any{"role": "user", "content": "next user turn"},
+	}
+}
+
+// TestApplyCurrentInputFileInlinePrefixUsesStructuredBody confirms the
+// new inline-prefix mode (RemoteFileUpload disabled) stops calling the
+// upload API and emits a single user message whose body is structured
+// with a "RECENT CONVERSATION TURNS" boundary marker. First turn is a
+// CheckpointRefresh (cache miss); a follow-up turn with the same prefix
+// hits the cache (Reused=true) and skips the marker shuffle.
+func TestApplyCurrentInputFileInlinePrefixUsesStructuredBody(t *testing.T) {
+	ds := &inlineUploadDSStub{}
+	h := &openAITestSurface{
+		Store: mockOpenAIConfig{
+			wideInput:           true,
+			currentInputEnabled: true,
+			currentInputMin:     100,
+			remoteFileUpload:    boolPtr(false), // inline mode (our v1.0.3+ default)
+		},
+		DS: ds,
+	}
+	req := map[string]any{
+		"model":    "deepseek-v4-pro",
+		"messages": makeLargeInlineMessages(40 * 1024),
+	}
+	stdReq, err := promptcompat.NormalizeOpenAIChatRequest(h.Store, req, "")
+	if err != nil {
+		t.Fatalf("normalize failed: %v", err)
+	}
+	out, err := h.applyCurrentInputFile(context.Background(),
+		&auth.RequestAuth{DeepSeekToken: "tk-inline-prefix", SessionKey: "sess-A", CallerID: "caller-A", AccountID: "acct-A"},
+		stdReq)
+	if err != nil {
+		t.Fatalf("apply failed: %v", err)
+	}
+	if len(ds.uploadCalls) != 0 {
+		t.Fatalf("inline mode must NOT call upload_file; got %d uploads", len(ds.uploadCalls))
+	}
+	if !out.CurrentInputFileApplied {
+		t.Fatalf("CurrentInputFileApplied should be true after inline-prefix path")
+	}
+	if !out.CurrentInputCheckpointRefresh {
+		t.Fatalf("first turn must mark CheckpointRefresh=true; got false")
+	}
+	if out.CurrentInputPrefixReused {
+		t.Fatalf("first turn must NOT reuse a prefix; got Reused=true")
+	}
+	if out.CurrentInputPrefixChars <= 0 {
+		t.Fatalf("first turn must record PrefixChars>0; got %d", out.CurrentInputPrefixChars)
+	}
+	if out.CurrentInputTailChars <= 0 {
+		t.Fatalf("first turn must record TailChars>0; got %d", out.CurrentInputTailChars)
+	}
+	if !strings.Contains(out.FinalPrompt, "--- RECENT CONVERSATION TURNS ---") {
+		t.Fatalf("inline-prefix body must contain the recent-turns marker; got %q", out.FinalPrompt)
+	}
+	if !strings.Contains(out.FinalPrompt, "--- INSTRUCTION ---") {
+		t.Fatalf("inline-prefix body must contain the instruction marker; got %q", out.FinalPrompt)
+	}
+
+	// Second turn: same session + extended transcript starting with the
+	// same stable prefix bytes → expect Reused=true, no upload, no
+	// checkpoint refresh.
+	follow := append([]any(nil), req["messages"].([]any)...)
+	follow = append(follow, map[string]any{"role": "assistant", "content": "ack"}, map[string]any{"role": "user", "content": "second user turn after the prefix anchor"})
+	req2 := map[string]any{"model": "deepseek-v4-pro", "messages": follow}
+	stdReq2, err := promptcompat.NormalizeOpenAIChatRequest(h.Store, req2, "")
+	if err != nil {
+		t.Fatalf("normalize follow-up failed: %v", err)
+	}
+	out2, err := h.applyCurrentInputFile(context.Background(),
+		&auth.RequestAuth{DeepSeekToken: "tk-inline-prefix", SessionKey: "sess-A", CallerID: "caller-A", AccountID: "acct-A"},
+		stdReq2)
+	if err != nil {
+		t.Fatalf("apply follow-up failed: %v", err)
+	}
+	if len(ds.uploadCalls) != 0 {
+		t.Fatalf("follow-up turn still must not upload; got %d uploads", len(ds.uploadCalls))
+	}
+	if !out2.CurrentInputPrefixReused {
+		t.Fatalf("follow-up turn with matching prefix must mark Reused=true; got false")
+	}
+	if out2.CurrentInputCheckpointRefresh {
+		t.Fatalf("follow-up turn must not be a CheckpointRefresh; got true")
+	}
+	if out2.CurrentInputPrefixHash != out.CurrentInputPrefixHash {
+		t.Fatalf("prefix hash should be stable across turns; first=%q follow=%q", out.CurrentInputPrefixHash, out2.CurrentInputPrefixHash)
+	}
+}
+
+// TestApplyCurrentInputFileInlinePrefixKeepsOlderVariantOnRefresh confirms
+// the multi-variant chain: when a session's transcript outgrows
+// currentInputMaxTailChars and forces a checkpoint refresh, the OLDER
+// prefix is NOT discarded — it stays in the chain so a follow-up turn
+// whose tail still fits the old prefix can still reuse it.
+func TestApplyCurrentInputFileInlinePrefixKeepsOlderVariantOnRefresh(t *testing.T) {
+	ds := &inlineUploadDSStub{}
+	h := &openAITestSurface{
+		Store: mockOpenAIConfig{
+			wideInput:           true,
+			currentInputEnabled: true,
+			currentInputMin:     100,
+			remoteFileUpload:    boolPtr(false),
+		},
+		DS: ds,
+	}
+	authT := &auth.RequestAuth{DeepSeekToken: "tk-multi", SessionKey: "sess-multi", CallerID: "caller-multi", AccountID: "acct-multi"}
+
+	// Turn 1: large transcript → produce prefix P1.
+	turn1Msgs := makeLargeInlineMessages(40 * 1024)
+	stdReq, _ := promptcompat.NormalizeOpenAIChatRequest(h.Store, map[string]any{"model": "deepseek-v4-pro", "messages": turn1Msgs}, "")
+	out1, err := h.applyCurrentInputFile(context.Background(), authT, stdReq)
+	if err != nil {
+		t.Fatalf("turn1 failed: %v", err)
+	}
+	if !out1.CurrentInputCheckpointRefresh {
+		t.Fatalf("turn1 expected to be checkpoint refresh; got reused=%v", out1.CurrentInputPrefixReused)
+	}
+	hashP1 := out1.CurrentInputPrefixHash
+
+	// Turn 2: same prefix bytes + small new tail → reuses P1.
+	turn2Msgs := append([]any(nil), turn1Msgs...)
+	turn2Msgs = append(turn2Msgs, map[string]any{"role": "assistant", "content": "ack"}, map[string]any{"role": "user", "content": "tiny new turn"})
+	stdReq, _ = promptcompat.NormalizeOpenAIChatRequest(h.Store, map[string]any{"model": "deepseek-v4-pro", "messages": turn2Msgs}, "")
+	out2, err := h.applyCurrentInputFile(context.Background(), authT, stdReq)
+	if err != nil {
+		t.Fatalf("turn2 failed: %v", err)
+	}
+	if !out2.CurrentInputPrefixReused {
+		t.Fatalf("turn2 expected to reuse P1; got CheckpointRefresh=%v hash=%q", out2.CurrentInputCheckpointRefresh, out2.CurrentInputPrefixHash)
+	}
+	if out2.CurrentInputPrefixHash != hashP1 {
+		t.Fatalf("turn2 hash mismatch: want=%q got=%q", hashP1, out2.CurrentInputPrefixHash)
+	}
+
+	// Turn 3: bloat the transcript with ~150 KB extra so tail-after-P1
+	// exceeds currentInputMaxTailChars (128 KB) → forces a refresh
+	// producing a new prefix P2. The chain should NOW hold both P1 and P2.
+	turn3Msgs := append([]any(nil), turn2Msgs...)
+	turn3Msgs = append(turn3Msgs,
+		map[string]any{"role": "assistant", "content": strings.Repeat("FILLER ", 22000)},
+		map[string]any{"role": "user", "content": "user turn after bloat"})
+	stdReq, _ = promptcompat.NormalizeOpenAIChatRequest(h.Store, map[string]any{"model": "deepseek-v4-pro", "messages": turn3Msgs}, "")
+	out3, err := h.applyCurrentInputFile(context.Background(), authT, stdReq)
+	if err != nil {
+		t.Fatalf("turn3 failed: %v", err)
+	}
+	if !out3.CurrentInputCheckpointRefresh {
+		t.Fatalf("turn3 expected checkpoint refresh after bloat; got reused=%v", out3.CurrentInputPrefixReused)
+	}
+	hashP2 := out3.CurrentInputPrefixHash
+	if hashP2 == hashP1 {
+		t.Fatalf("turn3 expected NEW prefix P2 distinct from P1; both = %q", hashP1)
+	}
+
+	// Turn 4: replay turn-2-shape transcript (small tail above P1). The
+	// chain still has P1 → expect reuse, NOT another fresh refresh.
+	stdReq, _ = promptcompat.NormalizeOpenAIChatRequest(h.Store, map[string]any{"model": "deepseek-v4-pro", "messages": turn2Msgs}, "")
+	out4, err := h.applyCurrentInputFile(context.Background(), authT, stdReq)
+	if err != nil {
+		t.Fatalf("turn4 failed: %v", err)
+	}
+	if !out4.CurrentInputPrefixReused {
+		t.Fatalf("turn4 expected to reuse P1 from older chain slot; got refresh hash=%q", out4.CurrentInputPrefixHash)
+	}
+	if out4.CurrentInputPrefixHash != hashP1 {
+		t.Fatalf("turn4 should reuse P1 specifically; want %q got %q", hashP1, out4.CurrentInputPrefixHash)
+	}
+}
+
+// TestApplyCurrentInputFileInlinePrefixIsolatesFromFileMode confirms the
+// store's mode tag prevents an inline-mode cached entry from being
+// reused as if it had a file_id when the same session later flips to
+// file mode.
+func TestApplyCurrentInputFileInlinePrefixIsolatesFromFileMode(t *testing.T) {
+	dsInline := &inlineUploadDSStub{}
+	hInline := &openAITestSurface{
+		Store: mockOpenAIConfig{
+			wideInput:           true,
+			currentInputEnabled: true,
+			currentInputMin:     100,
+			remoteFileUpload:    boolPtr(false),
+		},
+		DS: dsInline,
+	}
+	req := map[string]any{
+		"model":    "deepseek-v4-pro",
+		"messages": makeLargeInlineMessages(40 * 1024),
+	}
+	stdReq, _ := promptcompat.NormalizeOpenAIChatRequest(hInline.Store, req, "")
+	auth1 := &auth.RequestAuth{DeepSeekToken: "tk-iso", SessionKey: "sess-iso", CallerID: "caller-iso", AccountID: "acct-iso"}
+	if _, err := hInline.applyCurrentInputFile(context.Background(), auth1, stdReq); err != nil {
+		t.Fatalf("inline first turn failed: %v", err)
+	}
+
+	// Now the same session re-enters via a file-mode handler. The cached
+	// inline-mode entry must NOT satisfy a file-mode cache hit (no
+	// FileID), so we expect a fresh upload to happen.
+	dsFile := &inlineUploadDSStub{}
+	hFile := &openAITestSurface{
+		Store: mockOpenAIConfig{
+			wideInput:           true,
+			currentInputEnabled: true,
+			currentInputMin:     100,
+			remoteFileUpload:    boolPtr(true),
+		},
+		DS: dsFile,
+	}
+	stdReq2, _ := promptcompat.NormalizeOpenAIChatRequest(hFile.Store, req, "")
+	if _, err := hFile.applyCurrentInputFile(context.Background(), auth1, stdReq2); err != nil {
+		t.Fatalf("file-mode turn failed: %v", err)
+	}
+	if len(dsFile.uploadCalls) == 0 {
+		t.Fatalf("switching to file mode must trigger a fresh upload; got 0 uploads (inline cache leaked across modes)")
+	}
+}

@@ -25,8 +25,16 @@ import (
 )
 
 const (
-	defaultMemoryTTL      = 5 * time.Minute
-	defaultDiskTTL        = 4 * time.Hour
+	// Defaults sized for agent-style retry traffic: the dominant cache-hit
+	// niche is "client re-issued an identical body within the same logical
+	// session". 30 min memory keeps an entry hot across a typical agent
+	// re-deliberation cycle; 48 h disk lets a follow-up the next day still
+	// hit before falling through to upstream. These are pure DEFAULTS —
+	// operators override via cache.response.{memory,disk}_ttl_seconds in
+	// the admin WebUI and Store TTL is always authoritative (no per-path
+	// hardcoded override; see path_policy.go for the rationale).
+	defaultMemoryTTL      = 30 * time.Minute
+	defaultDiskTTL        = 48 * time.Hour
 	defaultMaxBody        = 64 << 20
 	defaultMemoryMaxBytes = int64(3800 * 1000 * 1000)
 	defaultDiskMaxBytes   = int64(16 * 1000 * 1000 * 1000)
@@ -260,6 +268,18 @@ func (c *Cache) Wrap(resolver CallerResolver, next http.Handler) http.Handler {
 		r.Body = io.NopCloser(bytes.NewReader(rawBody))
 
 		policy := pathPolicyFor(canonicalRequestPath(r.URL.Path))
+
+		// Streaming requests cannot produce a cacheable entry — short-circuit
+		// BEFORE the cache key + inflight slot machinery so streaming
+		// clients never share a slot with non-streaming peers and never
+		// burn a cache key compute. Adopted from cnb openclaw-tunning
+		// d8e209c — defensive against accidentally interleaving streaming
+		// and cached responses for the same request body.
+		if requestBodyStreamEnabled(rawBody) {
+			c.recordUncacheable(policy.Path, "stream_request")
+			next.ServeHTTP(w, r)
+			return
+		}
 
 		owner := ""
 		if resolver != nil {
@@ -630,9 +650,6 @@ func (c *Cache) bumpMemoryExpiryLocked(key string, now time.Time, policy pathPol
 		return
 	}
 	memoryTTL := c.memoryTTL
-	if policy.MemoryTTL > 0 {
-		memoryTTL = policy.MemoryTTL
-	}
 	if memoryTTL <= 0 {
 		return
 	}
@@ -702,11 +719,11 @@ func (c *Cache) removeFromSessionLocked(sessionKey, cacheKey string) {
 	}
 }
 
-// Set is a backward-compatible wrapper that uses no path policy (the global
-// memory/disk TTLs apply). External callers that don't carry path context
-// can keep using this; the in-package middleware always routes through
-// setWithPolicySession so per-path TTL overrides and session linkage take
-// effect.
+// Set is a backward-compatible wrapper that uses no path policy. External
+// callers without path context use this; the in-package middleware routes
+// through setWithPolicySession so the path's caller-partition flag and
+// session-bucket linkage are honored. TTLs come from Store config in either
+// path (no per-path TTL override).
 func (c *Cache) Set(key string, entry Entry) {
 	c.setWithPolicySession(key, "", entry, pathPolicy{})
 }
@@ -718,9 +735,6 @@ func (c *Cache) setWithPolicySession(key, sessionKey string, entry Entry, policy
 	}
 	now := time.Now()
 	diskTTL := c.diskTTL
-	if policy.DiskTTL > 0 {
-		diskTTL = policy.DiskTTL
-	}
 	if entry.DiskExpiresAt.IsZero() || !entry.DiskExpiresAt.After(now) {
 		entry.DiskExpiresAt = now.Add(diskTTL)
 	}
@@ -782,6 +796,31 @@ func replayBody(prefix []byte, rest io.ReadCloser) io.ReadCloser {
 	}
 }
 
+// requestBodyStreamEnabled inspects the request body JSON to detect whether
+// the caller asked for a streaming response. When true, the response will
+// not be cacheable downstream, so the cache layer can short-circuit the
+// entire single-flight / cache key apparatus before it locks anything.
+// Adopted from cnb openclaw-tunning d8e209c.
+func requestBodyStreamEnabled(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	var value struct {
+		Stream any `json:"stream"`
+	}
+	if err := json.Unmarshal(body, &value); err != nil {
+		return false
+	}
+	switch v := value.Stream.(type) {
+	case bool:
+		return v
+	case string:
+		return strings.EqualFold(strings.TrimSpace(v), "true")
+	default:
+		return false
+	}
+}
+
 func canonicalRequestPath(path string) string {
 	path = strings.TrimSpace(path)
 	switch path {
@@ -809,9 +848,6 @@ func (c *Cache) putMemoryWithPolicySession(key, sessionKey string, entry Entry, 
 		return
 	}
 	memoryTTL := c.memoryTTL
-	if policy.MemoryTTL > 0 {
-		memoryTTL = policy.MemoryTTL
-	}
 	expiresAt := now.Add(memoryTTL)
 	if entry.DiskExpiresAt.Before(expiresAt) {
 		expiresAt = entry.DiskExpiresAt

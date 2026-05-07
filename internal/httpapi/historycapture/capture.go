@@ -113,6 +113,28 @@ func (s *Session) BindAuth(a *auth.RequestAuth) {
 	})
 }
 
+// UpdateCurrentInputState mirrors stdReq's CIF prefix-reuse fields into the
+// persisted chat_history row. Called from the responses handler after
+// applyCurrentInputFile completes; chat handler uses an equivalent helper
+// in its own package.
+func (s *Session) UpdateCurrentInputState(stdReq promptcompat.StandardRequest) {
+	if s == nil || s.store == nil || s.disabled {
+		return
+	}
+	s.persistUpdate(chathistory.UpdateParams{
+		ElapsedMs: time.Since(s.startedAt).Milliseconds(),
+		CurrentInput: &chathistory.CurrentInputUpdate{
+			FileApplied:       stdReq.CurrentInputFileApplied,
+			PrefixHash:        stdReq.CurrentInputPrefixHash,
+			PrefixReused:      stdReq.CurrentInputPrefixReused,
+			PrefixChars:       stdReq.CurrentInputPrefixChars,
+			TailChars:         stdReq.CurrentInputTailChars,
+			TailEntries:       stdReq.CurrentInputTailEntries,
+			CheckpointRefresh: stdReq.CurrentInputCheckpointRefresh,
+		},
+	})
+}
+
 func (s *Session) Progress(thinking, content string) {
 	if s == nil || s.store == nil || s.disabled {
 		return
