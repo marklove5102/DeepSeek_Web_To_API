@@ -18,7 +18,7 @@ type claudeAutoDeleteStoreStub struct {
 	mode string
 }
 
-func (claudeAutoDeleteStoreStub) ModelAliases() map[string]string  { return nil }
+func (claudeAutoDeleteStoreStub) ModelAliases() map[string]string   { return nil }
 func (claudeAutoDeleteStoreStub) CompatStripReferenceMarkers() bool { return true }
 func (s claudeAutoDeleteStoreStub) AutoDeleteMode() string          { return s.mode }
 
