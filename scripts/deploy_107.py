@@ -23,9 +23,11 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 BUILD_DIR = os.path.join(REPO_ROOT, "build")
 LOCAL_BIN = os.path.join(BUILD_DIR, "deepseek-web-to-api-linux-amd64")
+LOCAL_WEBUI_DIR = os.path.join(REPO_ROOT, "static", "admin")
 VERSION_FILE = os.path.join(REPO_ROOT, "VERSION")
 REMOTE_BIN = "/opt/deepseek-web-to-api/deepseek-web-to-api"
 REMOTE_NEW = REMOTE_BIN + ".new"
+REMOTE_WEBUI_DIR = "/opt/deepseek-web-to-api/static/admin"
 SERVICE = "deepseek-web-to-api"
 LDFLAGS_VAR = "DeepSeek_Web_To_API/internal/version.BuildVersion"
 
@@ -114,11 +116,45 @@ if SSH_KEY_FILE:
 else:
     print("[auth] using password (consider running scripts/setup_prod_keyauth.py to switch to key-only)")
     c.connect(HOST, username=USER, password=password, allow_agent=False, look_for_keys=False, timeout=30)
+def sync_webui(sftp_client):
+    """Recursively upload static/admin/* to /opt/deepseek-web-to-api/static/admin/.
+    WebUI assets are file-system-served (not embedded in the Go binary),
+    so they must be SCP'd alongside the binary. Idempotent: re-uploading
+    overwrites in place. Set SKIP_WEBUI=1 to skip when only the binary
+    changed."""
+    import posixpath
+    if not os.path.isdir(LOCAL_WEBUI_DIR):
+        print(f"[webui] no {LOCAL_WEBUI_DIR} dir; skipping (run 'npm run build' in webui/ first)")
+        return
+    def mkdirs(path):
+        parts = path.strip("/").split("/")
+        cur = ""
+        for part in parts:
+            cur += "/" + part
+            try:
+                sftp_client.stat(cur)
+            except IOError:
+                sftp_client.mkdir(cur)
+    mkdirs(REMOTE_WEBUI_DIR)
+    n = 0
+    for root, _dirs, files in os.walk(LOCAL_WEBUI_DIR):
+        rel = os.path.relpath(root, LOCAL_WEBUI_DIR).replace(os.sep, "/")
+        rdir = REMOTE_WEBUI_DIR if rel == "." else posixpath.join(REMOTE_WEBUI_DIR, rel)
+        mkdirs(rdir)
+        for f in files:
+            sftp_client.put(os.path.join(root, f), posixpath.join(rdir, f))
+            n += 1
+    print(f"[webui] synced {n} files to {REMOTE_WEBUI_DIR}")
+
 try:
     run(c, "hostname; systemctl is-active " + SERVICE)
     sftp = c.open_sftp()
     sftp.put(LOCAL_BIN, REMOTE_NEW)
     sftp.chmod(REMOTE_NEW, 0o755)
+    if os.environ.get("SKIP_WEBUI") not in ("1", "true", "yes"):
+        sync_webui(sftp)
+    else:
+        print("[webui] SKIP_WEBUI set — leaving remote webui assets untouched")
     sftp.close()
     out = run(c, f"sha256sum {REMOTE_NEW}")
     remote_sha = out.split()[0] if out.split() else ""
