@@ -2,41 +2,19 @@ package chat
 
 import (
 	"context"
-	"time"
 
 	"DeepSeek_Web_To_API/internal/auth"
-	"DeepSeek_Web_To_API/internal/config"
+	"DeepSeek_Web_To_API/internal/httpapi/openai/shared"
 )
 
+// autoDeleteRemoteSession is a thin wrapper that snapshots the operator's
+// auto-delete mode from the Store and forwards to the shared cleanup
+// implementation. The shared implementation (Issue #20 fix) is now reused
+// from /v1/responses and /v1/messages so all three paths honor the same
+// WebUI toggle.
 func (h *Handler) autoDeleteRemoteSession(ctx context.Context, a *auth.RequestAuth, sessionID string) {
-	mode := h.Store.AutoDeleteMode()
-	if mode == "none" || a.DeepSeekToken == "" {
+	if h == nil || h.Store == nil || a == nil {
 		return
 	}
-
-	deleteBaseCtx := context.WithoutCancel(ctx)
-	deleteCtx, cancel := context.WithTimeout(deleteBaseCtx, 10*time.Second)
-	defer cancel()
-
-	switch mode {
-	case "single":
-		if sessionID == "" {
-			config.Logger.Warn("[auto_delete_sessions] skipped single-session delete because session_id is empty", "account", a.AccountID)
-			return
-		}
-		_, err := h.DS.DeleteSessionForToken(deleteCtx, a.DeepSeekToken, sessionID)
-		if err != nil {
-			config.Logger.Warn("[auto_delete_sessions] failed", "account", a.AccountID, "mode", mode, "session_id", sessionID, "error", err)
-			return
-		}
-		config.Logger.Debug("[auto_delete_sessions] success", "account", a.AccountID, "mode", mode, "session_id", sessionID)
-	case "all":
-		if err := h.DS.DeleteAllSessionsForToken(deleteCtx, a.DeepSeekToken); err != nil {
-			config.Logger.Warn("[auto_delete_sessions] failed", "account", a.AccountID, "mode", mode, "error", err)
-			return
-		}
-		config.Logger.Debug("[auto_delete_sessions] success", "account", a.AccountID, "mode", mode)
-	default:
-		config.Logger.Warn("[auto_delete_sessions] unknown mode", "account", a.AccountID, "mode", mode)
-	}
+	shared.AutoDeleteRemoteSession(ctx, h.DS, h.Store.AutoDeleteMode(), a.AccountID, a.DeepSeekToken, sessionID)
 }

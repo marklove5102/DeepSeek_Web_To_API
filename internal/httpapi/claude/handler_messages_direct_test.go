@@ -12,6 +12,7 @@ import (
 
 	"DeepSeek_Web_To_API/internal/auth"
 	"DeepSeek_Web_To_API/internal/chathistory"
+	dsclient "DeepSeek_Web_To_API/internal/deepseek/client"
 )
 
 type directClaudeAuthStub struct {
@@ -59,6 +60,14 @@ func (s *directClaudeDSStub) GetPow(_ context.Context, _ *auth.RequestAuth, _ in
 func (s *directClaudeDSStub) CallCompletion(_ context.Context, _ *auth.RequestAuth, payload map[string]any, _ string, _ int) (*http.Response, error) {
 	s.seenPayload = payload
 	return s.resp, nil
+}
+
+func (s *directClaudeDSStub) DeleteSessionForToken(_ context.Context, _ string, _ string) (*dsclient.DeleteSessionResult, error) {
+	return &dsclient.DeleteSessionResult{}, nil
+}
+
+func (s *directClaudeDSStub) DeleteAllSessionsForToken(_ context.Context, _ string) error {
+	return nil
 }
 
 func TestClaudeMessagesUsesNativeDirectStream(t *testing.T) {

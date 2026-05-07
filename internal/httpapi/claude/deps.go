@@ -18,11 +18,20 @@ type DeepSeekCaller interface {
 	CreateSession(ctx context.Context, a *auth.RequestAuth, maxAttempts int) (string, error)
 	GetPow(ctx context.Context, a *auth.RequestAuth, maxAttempts int) (string, error)
 	CallCompletion(ctx context.Context, a *auth.RequestAuth, payload map[string]any, powResp string, maxAttempts int) (*http.Response, error)
+	// Issue #20 fix: /v1/messages must clean up remote sessions when the
+	// operator enables the WebUI auto-delete toggle. Pulled into the
+	// claude-side interface so deps_injection can mock it; the production
+	// dsclient.Client already implements both methods.
+	DeleteSessionForToken(ctx context.Context, token string, sessionID string) (*dsclient.DeleteSessionResult, error)
+	DeleteAllSessionsForToken(ctx context.Context, token string) error
 }
 
 type ConfigReader interface {
 	ModelAliases() map[string]string
 	CompatStripReferenceMarkers() bool
+	// Issue #20 fix: handler reads the snapshot to decide whether to
+	// schedule an upstream session delete after the request completes.
+	AutoDeleteMode() string
 }
 
 type OpenAIChatRunner interface {

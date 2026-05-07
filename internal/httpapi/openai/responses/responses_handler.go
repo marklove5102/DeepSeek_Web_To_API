@@ -95,7 +95,14 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 	if historySession != nil {
 		historySession.BindAuth(a)
 	}
-	defer h.Auth.Release(a)
+	var sessionID string
+	defer func() {
+		// Issue #20: /v1/responses must honor the WebUI auto-delete toggle
+		// the same way /v1/chat/completions does. The session id may still
+		// be empty if CreateSession failed below — the helper handles that.
+		shared.AutoDeleteRemoteSession(r.Context(), h.DS, h.Store.AutoDeleteMode(), a.AccountID, a.DeepSeekToken, sessionID)
+		h.Auth.Release(a)
+	}()
 	r = r.WithContext(auth.WithAuth(r.Context(), a))
 	owner := responseStoreOwner(a)
 	if owner == "" {
@@ -138,7 +145,7 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 		historySession.UpdateCurrentInputState(stdReq)
 	}
 
-	sessionID, err := h.DS.CreateSession(r.Context(), a, 3)
+	sessionID, err = h.DS.CreateSession(r.Context(), a, 3)
 	if err != nil {
 		handleCreateSessionError(w, historySession, a, err)
 		return

@@ -68,13 +68,20 @@ func (h *Handler) handleDirectClaudeIfAvailable(w http.ResponseWriter, r *http.R
 	if historySession != nil {
 		historySession.BindAuth(a)
 	}
-	defer h.Auth.Release(a)
+	var sessionID string
+	defer func() {
+		// Issue #20: /v1/messages (Claude Code) was the most-affected path
+		// of the auto-delete miss because Claude Code is the dominant
+		// client on this surface. Mirror the chat handler's behavior.
+		openaishared.AutoDeleteRemoteSession(r.Context(), h.DS, h.Store.AutoDeleteMode(), a.AccountID, a.DeepSeekToken, sessionID)
+		h.Auth.Release(a)
+	}()
 
 	r = r.WithContext(auth.WithAuth(r.Context(), a))
 	if historySession == nil {
 		historySession = historycapture.Start(h.ChatHistory, r, a, norm.Standard)
 	}
-	sessionID, err := h.DS.CreateSession(r.Context(), a, 3)
+	sessionID, err = h.DS.CreateSession(r.Context(), a, 3)
 	if err != nil {
 		sessionDetail := openaishared.SessionErrorDetail(err)
 		if sessionDetail.Stopped || sessionDetail.Status == http.StatusGatewayTimeout {
