@@ -86,7 +86,7 @@ func (h *Handler) handleDirectClaudeIfAvailable(w http.ResponseWriter, r *http.R
 	// v1.0.14: LLM-based binary safety check on the assembled standard
 	// prompt. Blocks return 403 with policy_blocked finish_reason; the
 	// caller's deferred AutoDeleteRemoteSession still fires cleanly.
-	if openaishared.RunSafetyCheckAndBlock(r.Context(), h.SafetyLLM, a, norm.Standard.FinalPrompt, w, h.Store.SafetyBlockMessage(), func(_ safetyllm.Verdict) {
+	if openaishared.RunSafetyCheckAndBlock(r.Context(), h.SafetyLLM, a, openaishared.PickAuditText(norm.Standard.LatestUserText, norm.Standard.FinalPrompt), w, h.Store.SafetyBlockMessage(), func(_ safetyllm.Verdict) {
 		if historySession != nil {
 			historySession.Error(http.StatusForbidden, "blocked by safety policy", "error", "policy_blocked", "")
 		}

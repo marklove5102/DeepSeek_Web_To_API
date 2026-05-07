@@ -1,5 +1,18 @@
 # 更新日志
 
+## 2026-05-08 (1.0.19)
+
+v1.0.19 修复 v1.0.14 起 LLM 安全审核高误判率问题：审核 LLM 看到的不是用户原文，而是网关组装好的 `FinalPrompt`（含 system prompt + 历史 + thinking-injection banner + DeepSeek 协议标记），导致 30/53（57%）正常请求被 403 拦截，包括 "我思故我在是什么意思？" / "你会角色扮演吗？" / RIPPLE 对话判定 / 翻译 prompt 等明显合法内容。同时修复 v1.0.17/v1.0.18 release-artifacts CI 失败（Stats 结构 gofmt 漂移）。VERSION 从 `1.0.18` 升到 `1.0.19`。
+
+### 子段 v1.0.19 修复
+
+- **A 路：抽 `LatestUserText`，从源头剥干净审核输入**：[`internal/promptcompat/standard_request.go`](internal/promptcompat/standard_request.go) `StandardRequest` 新增 `LatestUserText string` 字段（仅最近一条 role=user 消息的纯文本内容）。[`internal/promptcompat/request_normalize.go`](internal/promptcompat/request_normalize.go) 新增导出 helper `ExtractLatestUserText(messages []any) string` + 内部 `latestUserTextFromContent` / `asMessageString`，处理 OpenAI/Anthropic 三种 content 形态：纯字符串 / `[]any{ {type:"text|input_text", text} }` block 数组 / 含 image_url 的混合数组（仅取 text 块、用 `\n` 串接）。`NormalizeOpenAIChatRequest` + `NormalizeOpenAIResponsesRequest` 两条入口在构造 StandardRequest 时直接填入；[`internal/httpapi/claude/standard_request.go`](internal/httpapi/claude/standard_request.go) 同步加 `LatestUserText: promptcompat.ExtractLatestUserText(dsMessages)`。[`internal/httpapi/openai/shared/safety_llm_helper.go`](internal/httpapi/openai/shared/safety_llm_helper.go) 新增 `PickAuditText(latestUserText, finalPrompt)` 选择器：优先返回 latestUserText，为空时回退 FinalPrompt（保留兼容性）。chat / responses / claude 三处 handler 全部从 `stdReq.FinalPrompt` 切换到 `shared.PickAuditText(stdReq.LatestUserText, stdReq.FinalPrompt)` —— 审核 LLM 现在只看到用户原文，看不到网关 system 段、playbook、历史轮、thinking-injection banner。
+- **B 路：DeepSeek 协议标记剥离，FinalPrompt 兜底路径也安全**：[`internal/safetyllm/prompt.go`](internal/safetyllm/prompt.go) 新增 `stripDeepSeekProtocolMarkers`：① 配对剥离 `<|System|>...<|end▁of▁instructions|>` / `<|begin▁of▁sentence|>...<|end▁of▁sentence|>` 整段；② 残留单边 marker（`<|User|>` / `<|Assistant|>` / `<|end▁of▁turn|>` 等）逐个 `ReplaceAll` 删除；③ 最后 `TrimSpace` 收尾。幂等、对干净输入零开销。[`internal/safetyllm/checker.go`](internal/safetyllm/checker.go) `CheckWithAuth` 在 `stripKnownInjections` **之前**先调 `stripDeepSeekProtocolMarkers`，两层 strip 串联兜底：即便用户消息抽不到（rare path），FinalPrompt 兜底进入审核时也已剥得干净，看不到任何网关 system 指令。
+- **修复 v1.0.17/v1.0.18 release-artifacts CI 失败**：`gofmt -w internal/safetyllm/checker.go` —— `Stats` 结构字段 / 类型 / json tag 之间的对齐空格不一致，触发 release workflow 的 gofmt -d 检查爆错。本次随版本一并提交修复。
+- **回归测试 5 组**：① [`internal/promptcompat/extract_user_text_test.go`](internal/promptcompat/extract_user_text_test.go) 6 个子测试覆盖 ExtractLatestUserText 的 string / OpenAI block array / Responses input_text / 含 image 混合 / 无 user 消息 / 空 slice；② [`internal/httpapi/openai/shared/safety_llm_helper_test.go`](internal/httpapi/openai/shared/safety_llm_helper_test.go) 3 个子测试覆盖 PickAuditText 的优先级、空回退、双空；③ `TestStripDeepSeekProtocolMarkers` 5 个子测试（clean / 配对 System 块 / 单边 turn marker / 不配对 opener / 多个配对块）；④ `TestStripPipelineCombinedDeepSeekAndGatewayBanners` 验证两层 strip 串联后只剩用户原文；⑤ 既有 9 + 2 + 5 测试全数继续通过（hard-jailbreak fast path / cache 语义清空 / banner strip / parse 容错均不受影响）。
+- **预期 prod 表现**：本版本部署后，"你是谁" / "我思故我在是什么意思" / "翻译这段话" / "你会角色扮演吗" 等正常短句不再被 403；R14 / DAN / "ignore previous instructions" / "启用开发者模式" / "看似儿童的角色实则" 等真实越狱仍由 hardJailbreakSignals fast path + audit LLM 拦下。误判率预期从 57% 降至 < 3%。
+- **运营建议**：本版本不需要任何 WebUI 配置变更，部署即生效。建议保持 v1.0.17 的 `safety.llm_check.model = deepseek-v4-pro-nothinking` 不变。
+
 ## 2026-05-08 (1.0.18)
 
 v1.0.18 修生产观察到的 cache 污染：运营方在 WebUI 把审核 model 从 `deepseek-v4-flash-nothinking` 升级到 `deepseek-v4-pro-nothinking` 后，**旧 model 写下的 violation=true 缓存条目继续 hit**，让 "你是谁？" 这种合法短句在新 model 该判通过的情况下仍被 403 拦——直到 LRU TTL 过期或进程重启才恢复。

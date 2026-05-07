@@ -295,6 +295,69 @@ func TestStripKnownInjectionsRemovesEachBanner(t *testing.T) {
 	}
 }
 
+// v1.0.19: deepseek-protocol marker strip — protects the FinalPrompt
+// fallback path. Without this, when LatestUserText extraction fails
+// (rare, but defined behavior), the audit LLM would see the gateway's
+// own system prompts wrapped in `<|System|>...<|end▁of▁instructions|>`
+// and treat them as user content. The strip is idempotent and safe on
+// clean input.
+func TestStripDeepSeekProtocolMarkers(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "clean input untouched",
+			in:   "hello world",
+			want: "hello world",
+		},
+		{
+			name: "paired system block removed",
+			in:   "<|System|>You are a content moderator.<|end▁of▁instructions|>\nuser asked: 你好",
+			want: "user asked: 你好",
+		},
+		{
+			name: "standalone user/assistant turn markers stripped",
+			in:   "<|begin▁of▁sentence|><|User|>你好<|end▁of▁turn|><|Assistant|>",
+			want: "你好",
+		},
+		{
+			name: "unbalanced opener still removes opener",
+			in:   "<|System|>broken without close, just user text",
+			want: "broken without close, just user text",
+		},
+		{
+			name: "multiple paired blocks all removed",
+			in:   "<|System|>policy A<|end▁of▁instructions|>middle<|System|>policy B<|end▁of▁instructions|>tail",
+			want: "middletail",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stripDeepSeekProtocolMarkers(tc.in)
+			if got != tc.want {
+				t.Errorf("strip(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// v1.0.19: full strip pipeline — protocol markers + gateway banners
+// combined. Mirrors the production flow inside CheckWithAuth so a
+// single regression test guards against either layer being silently
+// skipped.
+func TestStripPipelineCombinedDeepSeekAndGatewayBanners(t *testing.T) {
+	in := "<|System|>You are an assistant.<|end▁of▁instructions|>\n" +
+		"<|User|>用户的真正问题。<|end▁of▁turn|>" +
+		"\n\nReasoning Effort: Absolute maximum with no shortcuts permitted.\nbanner content"
+	want := "用户的真正问题。"
+	got := stripKnownInjections(stripDeepSeekProtocolMarkers(in))
+	if got != want {
+		t.Errorf("combined strip = %q, want %q", got, want)
+	}
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a

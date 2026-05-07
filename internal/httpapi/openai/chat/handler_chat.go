@@ -117,7 +117,7 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// the audited text matches what we'd send upstream. Pre-CIF we'd miss
 	// content the operator considers part of the conversation; post-CIF
 	// we get the full prompt the model would actually see.
-	if shared.RunSafetyCheckAndBlock(r.Context(), h.SafetyLLM, a, stdReq.FinalPrompt, w, h.Store.SafetyBlockMessage(), func(_ safetyllm.Verdict) {
+	if shared.RunSafetyCheckAndBlock(r.Context(), h.SafetyLLM, a, shared.PickAuditText(stdReq.LatestUserText, stdReq.FinalPrompt), w, h.Store.SafetyBlockMessage(), func(_ safetyllm.Verdict) {
 		if historySession != nil {
 			historySession.error(http.StatusForbidden, "blocked by safety policy", "error", "policy_blocked", "")
 		}

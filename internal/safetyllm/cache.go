@@ -9,10 +9,10 @@ import (
 // lruCache is a small thread-safe LRU with absolute-time expiration.
 // Bounded by entry count + per-entry TTL.
 type lruCache struct {
-	mu      sync.Mutex
-	max     int
-	items   map[string]*list.Element
-	order   *list.List
+	mu    sync.Mutex
+	max   int
+	items map[string]*list.Element
+	order *list.List
 }
 
 type cacheEntry struct {

@@ -69,6 +69,7 @@ func normalizeClaudeRequest(store ConfigReader, req map[string]any) (claudeNorma
 			ResolvedModel:   dsModel,
 			ResponseModel:   strings.TrimSpace(model),
 			Messages:        dsMessages,
+			LatestUserText:  promptcompat.ExtractLatestUserText(dsMessages),
 			PromptTokenText: finalPrompt,
 			ToolsRaw:        toolsRequested,
 			FinalPrompt:     finalPrompt,

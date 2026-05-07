@@ -62,6 +62,66 @@ func stripKnownInjections(text string) string {
 	return text
 }
 
+// deepseekProtocolBlockOpeners are paired with deepseekProtocolBlockClosers
+// to peel whole `<|System|>...<|end▁of▁instructions|>` segments out of an
+// audit-input string. The gateway assembles these markers when it builds
+// the FinalPrompt; if v1.0.19's PickAuditText falls through to FinalPrompt
+// (no user message extracted), this strip ensures the audit LLM still does
+// not see internal system instructions and accidentally treat them as user
+// content.
+//
+// The unicode characters between "end" / "begin" / "of" / "instructions" /
+// "sentence" are U+2581 LOWER ONE EIGHTH BLOCK (the deepseek protocol uses
+// it where vanilla token vocabularies use a regular ASCII underscore).
+var deepseekProtocolBlockPairs = [][2]string{
+	{"<|System|>", "<|end▁of▁instructions|>"},
+	{"<|begin▁of▁sentence|>", "<|end▁of▁sentence|>"},
+}
+
+// deepseekProtocolStandaloneMarkers are removed in-place (not as paired
+// blocks) — turn separators that may appear at the boundaries of the
+// FinalPrompt rendering.
+var deepseekProtocolStandaloneMarkers = []string{
+	"<|begin▁of▁sentence|>",
+	"<|end▁of▁sentence|>",
+	"<|User|>",
+	"<|Assistant|>",
+	"<|end▁of▁turn|>",
+	"<|end▁of▁instructions|>",
+	"<|System|>",
+}
+
+// stripDeepSeekProtocolMarkers peels paired `<|System|>...<|end▁of▁instructions|>`
+// segments out of the input, then deletes any remaining standalone protocol
+// markers. Order matters: paired strip first so we don't leave dangling
+// inner content; standalone strip second to clean up unbalanced markers.
+//
+// Returns the cleaned text. Idempotent — safe to call on input that has
+// no markers (returns unchanged).
+func stripDeepSeekProtocolMarkers(text string) string {
+	for _, pair := range deepseekProtocolBlockPairs {
+		open, close := pair[0], pair[1]
+		for {
+			start := strings.Index(text, open)
+			if start < 0 {
+				break
+			}
+			end := strings.Index(text[start+len(open):], close)
+			if end < 0 {
+				// Unbalanced — remove just the opener and let the
+				// standalone pass below clean up the trailing close.
+				text = text[:start] + text[start+len(open):]
+				continue
+			}
+			text = text[:start] + text[start+len(open)+end+len(close):]
+		}
+	}
+	for _, marker := range deepseekProtocolStandaloneMarkers {
+		text = strings.ReplaceAll(text, marker, "")
+	}
+	return strings.TrimSpace(text)
+}
+
 // hardJailbreakSignals are byte-literal substrings that uniquely identify
 // active prompt-injection ATTEMPTS — not topic mentions. A normal
 // conversation about jailbreak research would not contain these specific

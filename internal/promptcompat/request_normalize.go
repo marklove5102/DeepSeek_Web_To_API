@@ -53,6 +53,7 @@ func NormalizeOpenAIChatRequest(store ConfigReader, req map[string]any, traceID 
 		ResolvedModel:   resolvedModel,
 		ResponseModel:   responseModel,
 		Messages:        messagesRaw,
+		LatestUserText:  ExtractLatestUserText(messagesRaw),
 		ToolsRaw:        req["tools"],
 		FinalPrompt:     finalPrompt,
 		ToolNames:       toolNames,
@@ -117,6 +118,7 @@ func NormalizeOpenAIResponsesRequest(store ConfigReader, req map[string]any, tra
 		ResolvedModel:   resolvedModel,
 		ResponseModel:   model,
 		Messages:        messagesRaw,
+		LatestUserText:  ExtractLatestUserText(messagesRaw),
 		ToolsRaw:        req["tools"],
 		FinalPrompt:     finalPrompt,
 		ToolNames:       toolNames,
@@ -128,6 +130,67 @@ func NormalizeOpenAIResponsesRequest(store ConfigReader, req map[string]any, tra
 		RefFileIDs:      refFileIDs,
 		PassThrough:     passThrough,
 	}, nil
+}
+
+// ExtractLatestUserText scans a normalized OpenAI/Claude messages array
+// (the same []any shape used everywhere in promptcompat) for the most
+// recent message with role=="user" and returns its content as plain text.
+// Used by v1.0.19 LLM safety review to avoid auditing the gateway's own
+// system prompts / history / injection banners — only the human's last
+// turn matters for content moderation.
+//
+// Handles three content shapes per OpenAI/Anthropic spec:
+//   - string content: returned verbatim
+//   - []any of {type:"text", text:"..."} / {type:"input_text", ...} blocks:
+//     concatenated with newlines
+//   - mixed (e.g. text + image_url): only text blocks are included
+//
+// Returns "" when no user message is found (audit will skip below
+// MinInputChars threshold, which is the safe degradation).
+func ExtractLatestUserText(messages []any) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg, ok := messages[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		role := strings.ToLower(strings.TrimSpace(asMessageString(msg["role"])))
+		if role != "user" {
+			continue
+		}
+		return latestUserTextFromContent(msg["content"])
+	}
+	return ""
+}
+
+func latestUserTextFromContent(content any) string {
+	switch c := content.(type) {
+	case string:
+		return c
+	case []any:
+		var parts []string
+		for _, part := range c {
+			pm, ok := part.(map[string]any)
+			if !ok {
+				continue
+			}
+			t := strings.ToLower(asMessageString(pm["type"]))
+			if t == "text" || t == "input_text" || t == "" {
+				if txt := asMessageString(pm["text"]); txt != "" {
+					parts = append(parts, txt)
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		return ""
+	}
+}
+
+func asMessageString(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
 }
 
 func ensureToolDetectionEnabled(toolNames []string, toolsRaw any) []string {

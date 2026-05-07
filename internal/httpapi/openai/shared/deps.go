@@ -34,7 +34,6 @@ type DeepSeekCaller interface {
 	DeleteAllSessionsForToken(ctx context.Context, token string) error
 }
 
-
 type ConfigReader interface {
 	ModelAliases() map[string]string
 	CompatWideInputStrictOutput() bool

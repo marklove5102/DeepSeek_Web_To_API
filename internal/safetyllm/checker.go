@@ -97,20 +97,20 @@ type Checker interface {
 
 // Stats is exported via /admin/metrics/overview safety_llm_check node.
 type Stats struct {
-	Enabled            bool   `json:"enabled"`
-	RequestsTotal      int64  `json:"requests_total"`
-	Violations         int64  `json:"violations"`
-	OK                 int64  `json:"ok"`
-	Skipped            int64  `json:"skipped_below_threshold"`
-	CacheHits          int64  `json:"cache_hits"`
-	CacheSize          int64  `json:"cache_size"`
-	Timeouts           int64  `json:"timeouts"`
-	UpstreamErrors     int64  `json:"upstream_errors"`
-	ParseErrors        int64  `json:"parse_errors"`
-	FailOpenInvocations int64 `json:"fail_open_invocations"`
-	ConcurrentInflight int64  `json:"concurrent_inflight"`
-	AvgLatencyMs       int64  `json:"avg_latency_ms"`
-	Model              string `json:"model"`
+	Enabled             bool   `json:"enabled"`
+	RequestsTotal       int64  `json:"requests_total"`
+	Violations          int64  `json:"violations"`
+	OK                  int64  `json:"ok"`
+	Skipped             int64  `json:"skipped_below_threshold"`
+	CacheHits           int64  `json:"cache_hits"`
+	CacheSize           int64  `json:"cache_size"`
+	Timeouts            int64  `json:"timeouts"`
+	UpstreamErrors      int64  `json:"upstream_errors"`
+	ParseErrors         int64  `json:"parse_errors"`
+	FailOpenInvocations int64  `json:"fail_open_invocations"`
+	ConcurrentInflight  int64  `json:"concurrent_inflight"`
+	AvgLatencyMs        int64  `json:"avg_latency_ms"`
+	Model               string `json:"model"`
 }
 
 // LLMChecker is the production Checker.
@@ -264,13 +264,21 @@ func (c *LLMChecker) CheckWithAuth(ctx context.Context, a *auth.RequestAuth, tex
 	c.requestsTotal++
 	c.mu.Unlock()
 
+	// v1.0.19: peel any DeepSeek protocol markers
+	// (`<|System|>...<|end▁of▁instructions|>`, `<|begin▁of▁sentence|>`,
+	// `<|User|>`, `<|end▁of▁turn|>`) before further processing. Callers
+	// now pass StandardRequest.LatestUserText (just the user's last
+	// message) but we still get FinalPrompt as a fallback when extraction
+	// fails — the strip ensures the audit LLM never sees gateway-built
+	// system instructions in either path. Idempotent on clean input.
+	stripped := stripDeepSeekProtocolMarkers(text)
 	// v1.0.17: strip our own gateway-injected banners (Reasoning Effort,
 	// ToolChainPlaybook, BINDING TOOL-USE COMPLIANCE) before deciding
 	// what to audit. Without this every chat request looks like
 	// "user_text + 'Reasoning Effort: ... Stress-test ... adversarial
 	// inputs'" and the audit LLM occasionally judged the gateway's own
 	// banner as violation, blocking legitimate short replies like "hello".
-	stripped := stripKnownInjections(text)
+	stripped = stripKnownInjections(stripped)
 	trimmed := strings.TrimSpace(stripped)
 	if len(trimmed) < cfg.MinInputChars {
 		c.mu.Lock()

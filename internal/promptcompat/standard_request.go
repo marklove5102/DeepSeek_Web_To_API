@@ -3,11 +3,20 @@ package promptcompat
 import "DeepSeek_Web_To_API/internal/config"
 
 type StandardRequest struct {
-	Surface                       string
-	RequestedModel                string
-	ResolvedModel                 string
-	ResponseModel                 string
-	Messages                      []any
+	Surface        string
+	RequestedModel string
+	ResolvedModel  string
+	ResponseModel  string
+	Messages       []any
+	// LatestUserText is the raw text content of the most recent user
+	// message in the request, with no system prompt / history / gateway
+	// injections / DeepSeek protocol markers attached. v1.0.19 LLM
+	// safety review uses this instead of FinalPrompt so the audit LLM
+	// only sees what the human typed — passing FinalPrompt was causing
+	// the audit to flag legitimate short prompts because it saw the
+	// gateway's own system instructions ("integrity guard ... adversarial
+	// inputs ...") and treated them as user content.
+	LatestUserText                string
 	HistoryText                   string
 	PromptTokenText               string
 	CurrentInputFileApplied       bool

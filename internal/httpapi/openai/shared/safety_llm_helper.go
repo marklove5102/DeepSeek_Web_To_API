@@ -8,6 +8,18 @@ import (
 	"DeepSeek_Web_To_API/internal/safetyllm"
 )
 
+// PickAuditText picks the best string to feed the safety LLM: the
+// latest user message text if available, otherwise falls back to the
+// fully-built final prompt (legacy behavior). v1.0.19+: callers should
+// pass stdReq.LatestUserText first; if empty (extractor couldn't find
+// a user message) the final prompt is the safe fallback.
+func PickAuditText(latestUserText, finalPrompt string) string {
+	if latestUserText != "" {
+		return latestUserText
+	}
+	return finalPrompt
+}
+
 // RunSafetyCheckAndBlock is the shared "run safety check, block if
 // violation" helper used by /v1/chat/completions, /v1/responses, and
 // /v1/messages handlers. Returns true when the caller must halt
