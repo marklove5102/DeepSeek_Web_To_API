@@ -80,6 +80,7 @@ func (p *Pool) Reset() {
 		"recommended_concurrency", p.recommendedConcurrency,
 		"max_queue_size", p.maxQueueSize,
 	)
+	warnLowGlobalMaxInflight(p.globalMaxInflight, p.maxInflightPerAccount, len(ids))
 }
 
 func (p *Pool) Release(accountID string) {

@@ -184,6 +184,105 @@ func TestApplyThinkingInjectionAppendsLatestUserPrompt(t *testing.T) {
 	}
 }
 
+// When tools are present and thinking is enabled (the typical Claude Code
+// agent flow), the long workflow playbook must move into the system block
+// so the model still sees it on no-thinking fast-path turns. The short
+// reasoning-effort half stays at the user-message tail. This regression
+// test pins both halves to their target locations — see Issue #18 for the
+// fast-path / lost tool_use failure mode that motivated the split.
+func TestApplyThinkingInjectionSplitsPlaybookToSystemWhenToolsPresent(t *testing.T) {
+	ds := &inlineUploadDSStub{}
+	h := &openAITestSurface{
+		Store: mockOpenAIConfig{
+			wideInput:         true,
+			thinkingInjection: boolPtr(true),
+		},
+		DS: ds,
+	}
+	req := map[string]any{
+		"model": "deepseek-v4-pro",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "list the files"},
+		},
+		"tools": []any{
+			map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name":        "Read",
+					"description": "Read a file",
+					"parameters": map[string]any{
+						"type":       "object",
+						"properties": map[string]any{"file_path": map[string]any{"type": "string"}},
+					},
+				},
+			},
+		},
+	}
+	stdReq, err := promptcompat.NormalizeOpenAIChatRequest(h.Store, req, "")
+	if err != nil {
+		t.Fatalf("normalize failed: %v", err)
+	}
+
+	out, err := h.applyCurrentInputFile(context.Background(), &auth.RequestAuth{DeepSeekToken: "token"}, stdReq)
+	if err != nil {
+		t.Fatalf("apply thinking injection failed: %v", err)
+	}
+
+	// The reasoning effort marker must still anchor the latest user turn.
+	userMarker := "list the files\n\n" + promptcompat.ThinkingInjectionMarker
+	if !strings.Contains(out.FinalPrompt, userMarker) {
+		t.Fatalf("reasoning effort missing from latest user message; final prompt=%s", out.FinalPrompt)
+	}
+	// The playbook (Tool-Chain Discipline) must have moved into the system
+	// block (and therefore appear *before* the user marker in the prompt).
+	playbookProbe := "Tool-Chain Discipline"
+	if !strings.Contains(out.FinalPrompt, playbookProbe) {
+		t.Fatalf("playbook missing from final prompt; got %s", out.FinalPrompt)
+	}
+	playbookIdx := strings.Index(out.FinalPrompt, playbookProbe)
+	userIdx := strings.Index(out.FinalPrompt, userMarker)
+	if playbookIdx < 0 || userIdx < 0 || playbookIdx >= userIdx {
+		t.Fatalf("playbook should precede the user-tail reasoning effort marker; playbook_idx=%d user_idx=%d", playbookIdx, userIdx)
+	}
+	// And the user tail must NOT carry the playbook duplicate (the legacy
+	// behaviour was to dump everything into the user message).
+	tail := out.FinalPrompt[userIdx:]
+	if strings.Contains(tail, playbookProbe) {
+		t.Fatalf("playbook must not be duplicated at the user tail; tail=%s", tail)
+	}
+}
+
+// Without tools the playbook is dead weight — the legacy single-block
+// injection at the user tail is preserved.
+func TestApplyThinkingInjectionKeepsLegacyShapeWithoutTools(t *testing.T) {
+	ds := &inlineUploadDSStub{}
+	h := &openAITestSurface{
+		Store: mockOpenAIConfig{
+			wideInput:         true,
+			thinkingInjection: boolPtr(true),
+		},
+		DS: ds,
+	}
+	req := map[string]any{
+		"model": "deepseek-v4-pro",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "tell me a story"},
+		},
+	}
+	stdReq, err := promptcompat.NormalizeOpenAIChatRequest(h.Store, req, "")
+	if err != nil {
+		t.Fatalf("normalize failed: %v", err)
+	}
+	out, err := h.applyCurrentInputFile(context.Background(), &auth.RequestAuth{DeepSeekToken: "token"}, stdReq)
+	if err != nil {
+		t.Fatalf("apply thinking injection failed: %v", err)
+	}
+	// Legacy contract: full default prompt at the user tail.
+	if !strings.Contains(out.FinalPrompt, "tell me a story\n\n"+promptcompat.ThinkingInjectionMarker) {
+		t.Fatalf("expected legacy injection at user tail without tools; got %s", out.FinalPrompt)
+	}
+}
+
 func TestApplyThinkingInjectionUsesCustomPrompt(t *testing.T) {
 	ds := &inlineUploadDSStub{}
 	h := &openAITestSurface{
