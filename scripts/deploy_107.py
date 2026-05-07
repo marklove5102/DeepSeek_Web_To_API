@@ -79,9 +79,19 @@ def run(c, cmd, ok_codes=(0,)):
         raise SystemExit(f"command failed (rc={rc})")
     return out
 
-password = os.environ.get("DST_PASSWORD")
-if not password:
-    print("DST_PASSWORD env required", file=sys.stderr); sys.exit(2)
+# Auth resolution: prefer ssh key (build/ds2api_deploy, gitignored) over
+# password. Once setup_prod_keyauth.py has run, prod no longer accepts
+# password auth and DST_PASSWORD is irrelevant.
+SSH_KEY_FILE = os.environ.get("DST_SSH_KEY", "").strip()
+if not SSH_KEY_FILE:
+    default_key = os.path.join(BUILD_DIR, "ds2api_deploy")
+    if os.path.exists(default_key):
+        SSH_KEY_FILE = default_key
+
+password = os.environ.get("DST_PASSWORD", "").strip() or None
+if not SSH_KEY_FILE and not password:
+    print("Either DST_SSH_KEY (or build/ds2api_deploy) must exist, or DST_PASSWORD env must be set", file=sys.stderr)
+    sys.exit(2)
 
 if os.environ.get("SKIP_BUILD") not in ("1", "true", "yes"):
     version = read_version()
@@ -98,7 +108,12 @@ print(f"[local] sha256={local_sha} size={os.path.getsize(LOCAL_BIN)}")
 
 c = paramiko.SSHClient()
 c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-c.connect(HOST, username=USER, password=password, allow_agent=False, look_for_keys=False, timeout=30)
+if SSH_KEY_FILE:
+    print(f"[auth] using ssh key: {SSH_KEY_FILE}")
+    c.connect(HOST, username=USER, key_filename=SSH_KEY_FILE, allow_agent=False, look_for_keys=False, timeout=30)
+else:
+    print("[auth] using password (consider running scripts/setup_prod_keyauth.py to switch to key-only)")
+    c.connect(HOST, username=USER, password=password, allow_agent=False, look_for_keys=False, timeout=30)
 try:
     run(c, "hostname; systemctl is-active " + SERVICE)
     sftp = c.open_sftp()
