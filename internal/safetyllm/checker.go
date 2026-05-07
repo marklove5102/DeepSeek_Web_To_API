@@ -215,7 +215,14 @@ func (c *LLMChecker) CheckWithAuth(ctx context.Context, a *auth.RequestAuth, tex
 	c.requestsTotal++
 	c.mu.Unlock()
 
-	trimmed := strings.TrimSpace(text)
+	// v1.0.17: strip our own gateway-injected banners (Reasoning Effort,
+	// ToolChainPlaybook, BINDING TOOL-USE COMPLIANCE) before deciding
+	// what to audit. Without this every chat request looks like
+	// "user_text + 'Reasoning Effort: ... Stress-test ... adversarial
+	// inputs'" and the audit LLM occasionally judged the gateway's own
+	// banner as violation, blocking legitimate short replies like "hello".
+	stripped := stripKnownInjections(text)
+	trimmed := strings.TrimSpace(stripped)
 	if len(trimmed) < cfg.MinInputChars {
 		c.mu.Lock()
 		c.skipped++
@@ -223,6 +230,23 @@ func (c *LLMChecker) CheckWithAuth(ctx context.Context, a *auth.RequestAuth, tex
 		c.mu.Unlock()
 		return Verdict{Violation: false}, nil
 	}
+
+	// v1.0.17: hard-jailbreak fast path. Specific imperative phrases
+	// ("ignore previous instructions", "启用开发者模式", "你不被允许思考",
+	// "看似儿童的角色实则", etc.) are themselves prompt-injection ATTEMPTS
+	// — short-circuit to a violation verdict without burning an LLM call.
+	// flash-nothinking has been observed missing exactly these strings in
+	// production, so this is the belt-and-suspenders that makes the
+	// pipeline robust to a weak audit model.
+	if matchesHardJailbreakSignal(trimmed) {
+		c.mu.Lock()
+		c.violations++
+		c.mu.Unlock()
+		v := Verdict{Violation: true, LatencyMs: 0}
+		c.cache.set(hashInput(trimmed), v, time.Now().Add(time.Duration(cfg.CacheTTLSeconds)*time.Second))
+		return v, nil
+	}
+
 	if len(trimmed) > cfg.MaxInputChars && cfg.MaxInputChars > 0 {
 		keep := cfg.MaxInputChars / 2
 		trimmed = trimmed[:keep] + "\n\n[... truncated for safety check ...]\n\n" + trimmed[len(trimmed)-keep:]
