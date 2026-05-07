@@ -73,6 +73,11 @@ htmlcov/
 coverage*.out
 cover/
 
+# Python bytecode (scripts/deploy_107.py etc. leave these behind)
+__pycache__/
+*.pyc
+*.pyo
+
 # Misc
 .git/
 Thumbs.db
