@@ -80,16 +80,16 @@ func TestResolveExpandedHistoricalAliases(t *testing.T) {
 // rejected unless the operator added an explicit alias.
 func TestResolveModelStrictAllowlistRejectsHeuristicMatches(t *testing.T) {
 	cases := []string{
-		"o3-super",                  // ex-heuristic reasoner
-		"o3-super-nothinking",       // ex-heuristic reasoner with suffix
-		"gpt-99-mega",               // unknown OpenAI family
-		"claude-future-pro",         // unknown Anthropic family
-		"gemini-9.9-ultra",          // unknown Google family
-		"llama-9000-instruct",       // unknown Llama family
-		"qwen-galaxy",               // unknown Qwen family
-		"mistral-extreme",           // unknown Mistral family
-		"command-omega",             // unknown Cohere family
-		"some-random-vendor-model",  // wholly unknown family
+		"o3-super",                 // ex-heuristic reasoner
+		"o3-super-nothinking",      // ex-heuristic reasoner with suffix
+		"gpt-99-mega",              // unknown OpenAI family
+		"claude-future-pro",        // unknown Anthropic family
+		"gemini-9.9-ultra",         // unknown Google family
+		"llama-9000-instruct",      // unknown Llama family
+		"qwen-galaxy",              // unknown Qwen family
+		"mistral-extreme",          // unknown Mistral family
+		"command-omega",            // unknown Cohere family
+		"some-random-vendor-model", // wholly unknown family
 	}
 	for _, model := range cases {
 		t.Run(model, func(t *testing.T) {

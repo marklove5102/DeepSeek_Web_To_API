@@ -197,8 +197,8 @@ func DefaultModelAliases() map[string]string {
 		// (gemini-pro-vision intentionally not mapped — vision is disabled.
 		// Requests against gemini-pro-vision will resolve to nothing and be
 		// rejected at the strict allowlist gate.)
-		"gemini-pro":        "deepseek-v4-pro",
-		"gemini-pro-latest": "deepseek-v4-pro",
+		"gemini-pro":            "deepseek-v4-pro",
+		"gemini-pro-latest":     "deepseek-v4-pro",
 		"gemini-flash-latest":   "deepseek-v4-flash",
 		"gemini-1.5-pro":        "deepseek-v4-pro",
 		"gemini-1.5-flash":      "deepseek-v4-flash",

@@ -1,5 +1,9 @@
 # 更新日志
 
+## 2026-05-07 (1.0.11)
+
+v1.0.11 是 v1.0.10 的纯 lint-fix patch 版本：v1.0.10 release-artifacts CI 因为 [`internal/config/model_alias_test.go`](internal/config/model_alias_test.go) `TestResolveModelStrictAllowlistRejectsHeuristicMatches` 数组里注释列对齐与 [`internal/config/models.go`](internal/config/models.go) `DefaultModelAliases` 的 gemini 段空白宽度被 gofmt 拦截。功能性代码完全等价（v1.0.10 main commit 已部署到 prod 且 healthz 200，行为正确），本版本仅修 lint 让 GitHub Release 二进制能正确产出。无需重新部署 prod。
+
 ## 2026-05-07 (1.0.10)
 
 v1.0.10 是模型路由策略收紧版本：① 把模型 ID 解析改为**严格白名单**（移除启发式 family-prefix fallback，未在 supported list 或 alias map 里的模型 ID 一律拒绝）；② **隐藏并禁用** `deepseek-v4-vision`（从 `/v1/models` 列表移除、从所有 alias / GetModelConfig / GetModelType 路径剥离、加防御性 block 防止操作员通过自定义 alias 重新启用）。VERSION 从 `1.0.9` 升到 `1.0.10`。
