@@ -4,6 +4,14 @@
 
 本文记录当前 Go 代码库实际暴露的 HTTP 接口。默认 Base URL 为 `http://127.0.0.1:5001`。
 
+## 版本变更摘要（v1.0.8 ~ v1.0.12）
+
+| 版本 | 变更摘要 |
+|------|---------|
+| **v1.0.8** | **自动删除远程会话**统一接入：`/v1/chat/completions`、`/v1/responses`、`/v1/messages` 三条 handler 链均在请求结束后执行 `AutoDeleteRemoteSession`。修复前，Claude Code 使用的 `/v1/messages` 端点即使 WebUI 开启"结束后全部删除"也不清理会话（Issue #20）。 |
+| **v1.0.10** | **严格模型 allowlist（破坏性变更）**：移除模型族前缀启发式兜底（`gpt-` / `claude-` / `gemini-` 等前缀不再自动路由）。未在 `DefaultModelAliases` 或 WebUI Model Aliases 中的 id 返回 4xx。`deepseek-v4-vision` 从 `/v1/models` 隐藏并全端点封禁。 |
+| **v1.0.12** | **429 弹性故障转移**：上游返回 429 时触发账号池切换，不消耗重试配额。峰值时段 429 对客户端的暴露率显著降低；仅当池中所有账号同时触发限流时，客户端才会收到 429。 |
+
 ## 基础规则
 
 - 请求体：JSON 接口要求合法 UTF-8。
@@ -13,18 +21,19 @@
 - 直通 token 模式：token 不在 `keys` 中时作为 DeepSeek token 直通。
 - 管理鉴权：`POST /admin/login` 获取 JWT，其余管理接口使用 `Authorization: Bearer <jwt>` 或管理密钥。
 - 缓存命中响应头：`X-DeepSeek-Web-To-API-Cache: memory|disk`、`X-DeepSeek-Web-To-API-Cache-Expires-At`。
+- **模型 allowlist（v1.0.10+）**：`DefaultModelAliases` 覆盖约 100 个 OpenAI/Claude/Gemini 常见 id；自定义 id 需在 WebUI Settings → Model Aliases 添加显式映射，配置热重载无需重启。
 
 ## OpenAI 兼容接口
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `GET` | `/v1/models` | 返回可见模型列表 |
+| `GET` | `/v1/models` | 返回可见模型列表（`deepseek-v4-vision` 已隐藏） |
 | `GET` | `/v1/models/{model_id}` | 查询单个模型，支持 alias |
-| `POST` | `/v1/chat/completions` | Chat Completions，支持流式 |
-| `POST` | `/v1/responses` | Responses，支持流式和响应暂存 |
+| `POST` | `/v1/chat/completions` | Chat Completions，支持流式；v1.0.8 起执行会话自动清理 |
+| `POST` | `/v1/responses` | Responses，支持流式和响应暂存；v1.0.8 起执行会话自动清理 |
 | `GET` | `/v1/responses/{response_id}` | 读取暂存 Response |
-| `POST` | `/v1/files` | 上传文件并写入兼容引用 |
-| `POST` | `/v1/embeddings` | Embeddings 兼容响应 |
+| `POST` | `/v1/files` | 上传文件（multipart，支持 `purpose` 字段）并写入兼容引用 |
+| `POST` | `/v1/embeddings` | Embeddings 兼容响应（确定性，SharedAcrossCallers 缓存） |
 
 同时支持 `/models`、`/chat/completions`、`/responses`、`/files`、`/embeddings` 根路径别名，以及 `/v1/v1/*` 兼容别名。
 
@@ -46,10 +55,12 @@ curl http://127.0.0.1:5001/v1/chat/completions \
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/anthropic/v1/models` | Claude 风格模型列表 |
-| `POST` | `/anthropic/v1/messages` | Claude Messages，支持流式 |
-| `POST` | `/anthropic/v1/messages/count_tokens` | Token 估算 |
+| `POST` | `/anthropic/v1/messages` | Claude Messages，支持流式；v1.0.8 起执行会话自动清理 |
+| `POST` | `/anthropic/v1/messages/count_tokens` | Token 估算（确定性，SharedAcrossCallers 缓存） |
 | `POST` | `/v1/messages`、`/messages` | Messages 别名 |
 | `POST` | `/v1/messages/count_tokens`、`/messages/count_tokens` | Count Tokens 别名 |
+
+> **Claude Code 用户注意（v1.0.8 修复）**：v1.0.8 以前，即使 WebUI 开启"结束后全部删除"，通过 `/v1/messages` 发起的请求也不执行远程会话清理（Issue #20）。升级到 v1.0.8 后行为已与其他端点对齐。
 
 示例：
 
@@ -70,7 +81,7 @@ curl http://127.0.0.1:5001/anthropic/v1/messages \
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `POST` | `/v1beta/models/{model}:generateContent` | 非流式内容生成 |
+| `POST` | `/v1beta/models/{model}:generateContent` | 非流式内容生成（SharedAcrossCallers 缓存） |
 | `POST` | `/v1beta/models/{model}:streamGenerateContent` | 流式内容生成 |
 | `POST` | `/v1/models/{model}:generateContent` | v1 别名 |
 | `POST` | `/v1/models/{model}:streamGenerateContent` | v1 流式别名 |
@@ -91,7 +102,7 @@ curl "http://127.0.0.1:5001/v1beta/models/gemini-2.5-pro:generateContent?key=you
 | --- | --- | --- |
 | `POST` | `/admin/login` | 登录管理台 |
 | `GET` | `/admin/verify` | 校验 JWT |
-| `GET` / `POST` | `/admin/config` | 读取或更新完整配置 |
+| `GET` / `POST` | `/admin/config` | 读取或更新完整配置（含 Model Aliases 热重载） |
 | `POST` | `/admin/config/import` | 导入配置 |
 | `GET` | `/admin/config/export` | 导出配置 |
 | `GET` / `POST` | `/admin/accounts` | 查询或新增账号 |
@@ -126,5 +137,6 @@ X-DeepSeek-Web-To-API-Cache-Control: bypass
 
 - [配置说明](docs/configuration.md)
 - [API 兼容系统](docs/API%20Compatibility%20System/API%20Compatibility%20System.md)
+- [客户端兼容性](docs/client-compat/README.md)
 - [Prompt 兼容流程](docs/prompt-compatibility.md)
 - [工具调用语义](docs/toolcall-semantics.md)

@@ -8,6 +8,7 @@
 - [internal/httpapi/claude/handler_routes.go](file://internal/httpapi/claude/handler_routes.go)
 - [internal/promptcompat/responses_input_items.go](file://internal/promptcompat/responses_input_items.go)
 - [internal/server/router.go](file://internal/server/router.go)
+- [internal/config/models.go](file://internal/config/models.go)
 - [CHANGELOG.md](file://CHANGELOG.md)
 </cite>
 
@@ -35,11 +36,11 @@
 ```mermaid
 graph LR
 subgraph "客户端调研报告"
-A[codex.md] --> X[ds2api]
-B[opencode.md] --> X
-C[claude-coding-clients.md<br/>OpenClaw 主体 + Claude Code/Cline/Aider 比较] --> X
-D[cherry-studio.md] --> X
-E[claude-code.md<br/>Claude Code v2.x 专题] -.待生成.-> X
+A[codex.md<br/>Responses API] --> X[ds2api]
+B[opencode.md<br/>OpenAI + Anthropic] --> X
+C[claude-coding-clients.md<br/>OpenClaw 主体 + Claude Code/Cline/Aider] --> X
+D[cherry-studio.md<br/>OpenAI 兼容] --> X
+E[claude-code.md<br/>Claude Code v2.x 专题<br/>Issue #20 v1.0.8 修复] --> X
 end
 subgraph "ds2api 适配落点"
 X --> R1[internal/httpapi/openai/responses]
@@ -48,6 +49,7 @@ X --> R3[internal/httpapi/claude]
 X --> R4[internal/promptcompat]
 X --> R5[internal/translatorcliproxy]
 X --> R6[internal/server/router.go]
+X --> R7[internal/config/models.go<br/>v1.0.10 allowlist]
 end
 ```
 
@@ -76,13 +78,13 @@ end
 
 ## 客户端报告索引
 
-| 报告 | 客户端 | 主协议 | 行数 | 状态 |
-|---|---|---|---|---|
-| [codex.md](file://docs/client-compat/codex.md) | OpenAI 官方 Codex CLI（github.com/openai/codex） | **仅** Responses API（`/v1/responses`） | 482 | v1.0.12 P0 落地 |
-| [opencode.md](file://docs/client-compat/opencode.md) | OpenCode（github.com/sst/opencode）—— 终端编码 Agent | OpenAI 兼容 + Anthropic 双路径（Vercel AI SDK） | 367 | v1.0.12 P0 落地 |
-| [claude-coding-clients.md](file://docs/client-compat/claude-coding-clients.md) | OpenClaw（github.com/openclaw/openclaw）主体；Claude Code / Cline / Aider 差异点 | Anthropic Messages API | 290 | v1.0.12 P0 落地 |
-| [cherry-studio.md](file://docs/client-compat/cherry-studio.md) | Cherry Studio（CherryHQ/cherry-studio）—— Electron 桌面多模型客户端 | OpenAI 兼容（`type=openai` 默认） | 379 | v1.0.12 P0 落地 |
-| claude-code.md（待补） | Claude Code v2.x（github.com/anthropics/claude-code，Anthropic 官方 CLI）专题 | Anthropic Messages API | — | 调研中 |
+| 报告 | 客户端 | 主协议 | 状态 |
+|---|---|---|---|
+| [codex.md](file://docs/client-compat/codex.md) | OpenAI 官方 Codex CLI（github.com/openai/codex） | **仅** Responses API（`/v1/responses`） | v1.0.12 P0 落地；v1.0.8 auto-delete 修复 |
+| [opencode.md](file://docs/client-compat/opencode.md) | OpenCode（github.com/sst/opencode）—— 终端编码 Agent | OpenAI 兼容 + Anthropic 双路径（Vercel AI SDK） | v1.0.12 P0 落地；v1.0.10 allowlist 须确认 id |
+| [claude-coding-clients.md](file://docs/client-compat/claude-coding-clients.md) | OpenClaw（github.com/openclaw/openclaw）主体；Claude Code / Cline / Aider 差异点 | Anthropic Messages API | v1.0.12 P0 落地；v1.0.8 auto-delete 修复 |
+| [cherry-studio.md](file://docs/client-compat/cherry-studio.md) | Cherry Studio（CherryHQ/cherry-studio）—— Electron 桌面多模型客户端 | OpenAI 兼容（`type=openai` 默认） | v1.0.12 P0 落地；v1.0.10 可能需要添加 alias |
+| [claude-code.md](file://docs/client-compat/claude-code.md) | Claude Code v2.x（github.com/anthropics/claude-code，Anthropic 官方 CLI）专题 | Anthropic Messages API | **v1.0.8 Issue #20 修复**；v1.0.12 P0 落地 |
 
 **章节来源**
 - [docs/client-compat/codex.md](file://docs/client-compat/codex.md)
@@ -92,7 +94,7 @@ end
 
 ## P0/P1/P2 适配项
 
-汇总 4 份报告的 checklist，按 ds2api 当前实现状态分类：
+汇总各份报告的 checklist，按 ds2api 当前实现状态分类：
 
 ### 已实现（v1.0.4 ~ v1.0.12）
 
@@ -108,12 +110,15 @@ end
 | 响应缓存 TTL 调长（memory 5m→30m，disk 4h→24h） | cherry-studio | v1.0.12 | 配置层 |
 | `stream_options.include_usage` 容忍 | cherry-studio (#11652) | 天然兼容（Go json.Unmarshal 忽略未知字段） | — |
 | `betas` / `service_tier` / `reasoningSummary` 等未知顶层字段静默忽略 | 多家 | 天然兼容 | — |
+| **`AutoDeleteRemoteSession` 统一接入 chat / responses / claude 三条 handler（Issue #20）** | **claude-code（#20）** | **v1.0.8** | claude handler deferred cleanup |
+| **严格模型 allowlist；移除前缀启发式兜底；`deepseek-v4-vision` 全端点封禁** | 全局 | **v1.0.10** | `internal/config/models.go` |
+| **上游 429 弹性故障转移（不消耗重试配额）** | 全局 | **v1.0.12** | 账号池调度层 |
 
 ### 待实现（P1）
 
 | 改动 | 来源 | 涉及文件 |
 |---|---|---|
-| `tool_choice: {type: "any"}` / `{type: "tool", name: X}` 强制工具调用注入 system prompt hint | Claude Code（待 agent 报告确认） | `internal/httpapi/claude/standard_request.go` |
+| `tool_choice: {type: "any"}` / `{type: "tool", name: X}` 强制工具调用注入 system prompt hint | Claude Code | `internal/httpapi/claude/standard_request.go` |
 | `anthropic-beta` 头白名单过滤 | claude-coding-clients (LiteLLM `drop_params` 模式) | `internal/httpapi/claude/handler_messages.go` |
 | Cherry Studio Extended Thinking + MCP 的 assistant 消息 thinking 块 reorder | cherry-studio (#11404) | `internal/httpapi/claude/handler_utils.go` |
 | 多轮历史中 assistant 内嵌 base64 图片 Markdown 截断（防 413） | cherry-studio (#12602) | `internal/promptcompat/message_normalize.go` |
@@ -126,6 +131,16 @@ end
 | 基于 User-Agent 的客户端识别（`claude-cli/2.x.x`、`codex/0.x.x`、`opencode/x.y.z`） | 多家 | 中间件层（新增） |
 | `/v1beta` 前缀双兼容（Cherry Studio 自定义 Gemini 端点） | cherry-studio (#11541) | `internal/httpapi/gemini/handler_routes.go` |
 | `previous_response_id` 重建完整 input 历史时，包含已存储的 reasoning / tool_call output items | codex | `internal/httpapi/openai/responses/response_store.go` |
+
+### v1.0.10 运维注意事项（破坏性变更）
+
+v1.0.10 起，严格 allowlist 已生效。任何客户端若使用了 `DefaultModelAliases`（约 100 个常见 id）以外的模型 id，请求将返回 4xx。运维人员应：
+
+1. 检查所有客户端实际发送的 `model` 字段值。
+2. 在 ds2api WebUI Settings → Model Aliases 中为每个自定义 id 添加到实际 DeepSeek 模型的显式映射。
+3. 配置热重载，无需重启服务。
+
+`deepseek-v4-vision` 已从 `/v1/models` 列表隐藏并在所有端点拒绝，请从客户端配置中移除该 id。
 
 **章节来源**
 - 各 client-compat 子文档的 ds2api adaptation checklist

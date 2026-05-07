@@ -339,6 +339,14 @@ OpenCode 将完整对话历史存储在本地 SQLite（通过 Drizzle ORM），*
 r.Post("/api/messages", h.Messages)
 ```
 
+## ds2api 版本影响说明
+
+| ds2api 版本 | 对 OpenCode 的影响 |
+|------------|-----------------|
+| **v1.0.8** | `/v1/chat/completions`（OpenAI 兼容路径）和 `/v1/messages`（Anthropic 原生路径）的 handler 均已接入 `AutoDeleteRemoteSession`。WebUI"结束后全部删除"开关现在对 OpenCode 请求生效。 |
+| **v1.0.10** | **可能的破坏性变更**：若 OpenCode 的 `opencode.json` 中 `model` 字段使用了非 DefaultModelAliases 中的 id（如 `ds2api/deepseek-r1` 会被剥离前缀后得到 `deepseek-r1`，该 id 需在 allowlist 中），请求可能返回 4xx。**操作**：检查 `DefaultModelAliases` 是否已覆盖你使用的模型 id；若未覆盖，在 ds2api WebUI Settings → Model Aliases 添加映射。另外，需确认 OpenCode 的 `provider_id/model_id` 前缀剥离逻辑是否在 ds2api 层已处理。 |
+| **v1.0.12** | 上游 429 弹性故障转移，OpenCode 的多轮工具调用密集请求场景下 429 暴露率降低。 |
+
 ## 结论
 
 OpenCode 通过 Vercel AI SDK 抽象层与各提供商交互，支持自定义 baseURL 和 OpenAI 兼容路径，与 ds2api 的接入点高度契合。核心适配工作集中在三个方面：
@@ -346,6 +354,8 @@ OpenCode 通过 Vercel AI SDK 抽象层与各提供商交互，支持自定义 b
 1. **流式 text part ID 一致性**（多轮工具调用关键路径）
 2. **`reasoningSummary` 等扩展字段的无损透传或显式忽略**
 3. **`/api/messages` 路由别名补充**（应对 Anthropic SDK 默认路径差异）
+
+另外，v1.0.10 后需特别关注模型 id 的 allowlist 检查——OpenCode 使用复合格式 `provider/model`，ds2api 收到请求时需正确剥离 provider 前缀再做 allowlist 查询。
 
 现有 `translatorcliproxy` + `toolcall` 层的设计已为工具调用翻译提供了充分基础，重点需验证 Anthropic ↔ OpenAI 双向翻译在 OpenCode 实际工具名集合下的正确性。
 

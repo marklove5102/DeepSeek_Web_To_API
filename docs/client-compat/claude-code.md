@@ -5,6 +5,7 @@
 目标仓库：`e:/ds2api`（ds2api — DeepSeek-web-to-API 代理）  
 Claude Code 版本参考：v2.x（重点覆盖 v2.1.24 ~ v2.1.126，2026-05 调研时点）  
 信息来源：Anthropic 官方文档、claude-code GitHub Issues（#1229、#5318、#16848、#23220、#25597、#30926）、LiteLLM 事件报告、社区逆向分析  
+ds2api 版本变更记录：Issue #20（v1.0.8）、严格 allowlist（v1.0.10）、429 弹性故障转移（v1.0.12）  
 </cite>
 
 ---
@@ -508,19 +509,29 @@ anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,advanced-to
 
 ### 12. 代理兼容性已知问题
 
-| 问题现象 | 根本原因 | 解决方法 |
-|---------|---------|---------|
-| `400: system.N.cache_control.ephemeral.scope: Extra inputs are not permitted` | 代理不支持 `cache_control.scope` 字段（v2.1.24+ 引入） | 在转发前剥离 `scope` 字段（ds2api 的 `sanitizeClaudeBlockForPrompt` 已剥离 `cache_control` 整体） |
-| `400: invalid beta flag "advanced-tool-use-2025-11-20"` | Bedrock/旧版代理不识别 v2.1.69+ 新增 beta | 过滤该 beta 或设置 `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`（但该环境变量对此 beta 无效） |
-| `400: invalid beta flag "interleaved-thinking-2025-05-14"` | Vertex AI / 部分旧版代理不支持 | 代理需过滤不识别的 beta 而非透传 |
-| `/v1/messages/count_tokens` 返回 404 | 代理未实现该端点 | ds2api 已在 `handler_tokens.go` 实现；若未实现，Claude Code 会降级（不崩溃） |
-| `mcp_servers` 参数被代理剥离 | 代理不知道如何处理 | ds2api 通过 `expandMCPServersAsTools()` 将其展开为虚拟工具条目 |
-| 每次请求都 miss 响应缓存 | `x-anthropic-billing-header` 中的 per-req 指纹每次不同 | 响应缓存的 key 不应包含该头部；用户可设置 `CLAUDE_CODE_ATTRIBUTION_HEADER=0` |
-| thinking 块在 tool_use 之后 | 代理重排了内容块顺序 | 严格保持 thinking → tool_use 顺序（ds2api `stream_runtime_emit.go` 中已通过 `closeThinkingBlock()` 保证） |
-| 工具或思考超过 120 秒后 Claude Code 中止 workflow，agent 在 deepseek 这边其实还在跑 | **这是 Claude Code 客户端自己的工具超时**，与 ds2api 服务端 7200s 超时无关 | 在启动 Claude Code 前设置环境变量：`BASH_DEFAULT_TIMEOUT_MS=600000`（默认工具超时 10 min）+ `BASH_MAX_TIMEOUT_MS=1800000`（上限 30 min）。这两个变量控制 Bash / 长时工具的客户端等待窗口，与 ds2api 的 `http_total_timeout_seconds` 是两条独立的超时链 |
-| 思考 / 工具超时后，**之后的请求完全没被发到 deepseek** | Claude Code abort 旧请求时关掉的是它本地的 fetch context，但 ds2api 端的会话亲和（session affinity）仍然把后续请求绑到原账号，账号此时正在等待上一次响应；新请求会排队到 `account_max_inflight` 上限触发 429 / 等待超时 | ds2api v1.0.3-cnb 已经在 `internal/responsecache/cache.go` 加了 `single-flight in-flight dedup` 缓解；进一步建议：调小 `account_max_inflight`（默认 2，可在 admin 控制台改成 1）让请求快速失败而不是无限排队，配合上面的 `BASH_*` 超时设置 |
+| 问题现象 | 根本原因 | 解决方法 | 修复版本 |
+|---------|---------|---------|---------|
+| WebUI 开启"结束后全部删除"，但 Claude Code 会话仍在服务端堆积 | `AutoDeleteRemoteSession` 之前未接入 `/v1/messages` handler | 升级到 ds2api **v1.0.8**；`AutoDeleteRemoteSession` 共享 helper 已接入 claude handler 的 deferred cleanup 路径（Issue #20） | **v1.0.8 已修复** |
+| 客户端模型 id 返回 4xx，之前可以用 | v1.0.10 移除了前缀启发式兜底 | 在 WebUI Settings → Model Aliases 添加映射；`DefaultModelAliases` 已覆盖约 100 个常见 id | v1.0.10（破坏性变更） |
+| 峰值时段频繁收到 429 | 账号池限流 | v1.0.12 起上游 429 触发账号切换而不消耗重试配额，429 暴露率显著降低；若仍频繁，增加账号数量 | **v1.0.12 已改善** |
+| `400: system.N.cache_control.ephemeral.scope: Extra inputs are not permitted` | 代理不支持 `cache_control.scope` 字段（v2.1.24+ 引入） | 在转发前剥离 `scope` 字段（ds2api 的 `sanitizeClaudeBlockForPrompt` 已剥离 `cache_control` 整体） | 历史版本已处理 |
+| `400: invalid beta flag "advanced-tool-use-2025-11-20"` | Bedrock/旧版代理不识别 v2.1.69+ 新增 beta | 过滤该 beta 或设置 `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`（但该环境变量对此 beta 无效） | — |
+| `400: invalid beta flag "interleaved-thinking-2025-05-14"` | Vertex AI / 部分旧版代理不支持 | 代理需过滤不识别的 beta 而非透传 | — |
+| `/v1/messages/count_tokens` 返回 404 | 代理未实现该端点 | ds2api 已在 `handler_tokens.go` 实现；若未实现，Claude Code 会降级（不崩溃） | 历史版本已实现 |
+| `mcp_servers` 参数被代理剥离 | 代理不知道如何处理 | ds2api 通过 `expandMCPServersAsTools()` 将其展开为虚拟工具条目 | 历史版本已处理 |
+| 每次请求都 miss 响应缓存 | `x-anthropic-billing-header` 中的 per-req 指纹每次不同 | 响应缓存的 key 不应包含该头部；用户可设置 `CLAUDE_CODE_ATTRIBUTION_HEADER=0` | — |
+| thinking 块在 tool_use 之后 | 代理重排了内容块顺序 | 严格保持 thinking → tool_use 顺序（ds2api `stream_runtime_emit.go` 中已通过 `closeThinkingBlock()` 保证） | 历史版本已处理 |
+| 工具或思考超过 120 秒后 Claude Code 中止 workflow，agent 在 deepseek 这边其实还在跑 | **这是 Claude Code 客户端自己的工具超时**，与 ds2api 服务端 7200s 超时无关 | 在启动 Claude Code 前设置环境变量：`BASH_DEFAULT_TIMEOUT_MS=600000`（默认工具超时 10 min）+ `BASH_MAX_TIMEOUT_MS=1800000`（上限 30 min）。这两个变量控制 Bash / 长时工具的客户端等待窗口，与 ds2api 的 `http_total_timeout_seconds` 是两条独立的超时链 | — |
+| 思考 / 工具超时后，**之后的请求完全没被发到 deepseek** | Claude Code abort 旧请求时关掉的是它本地的 fetch context，但 ds2api 端的会话亲和（session affinity）仍然把后续请求绑到原账号，账号此时正在等待上一次响应；新请求会排队到 `account_max_inflight` 上限触发 429 / 等待超时 | ds2api v1.0.3-cnb 已经在 `internal/responsecache/cache.go` 加了 `single-flight in-flight dedup` 缓解；进一步建议：调小 `account_max_inflight`（默认 2，可在 admin 控制台改成 1）让请求快速失败而不是无限排队，配合上面的 `BASH_*` 超时设置 | v1.0.3+ |
+
+> **Issue #20（v1.0.8 重要修复）详解：**  
+> 根因：`AutoDeleteRemoteSession` 共享 helper 已经存在于 chat 和 responses handler 的 deferred cleanup 中，但 claude handler（`/v1/messages`）遗漏了这个接入点。Claude Code 几乎专用 `/v1/messages` 端点，导致即使 WebUI 开启"结束后全部删除"，Claude Code 发起的会话从不被清理。  
+> 修复路径：将 `AutoDeleteRemoteSession` 接入 claude handler 的 deferred cleanup（与 chat/responses 对齐）。  
+> 验证方法：开启 WebUI"结束后全部删除"，用 Claude Code 发起若干请求，然后在 admin 面板或直接查看 DeepSeek Web 会话列表，确认请求完成后会话被删除而非持续累积。
 
 > **v1.0.2 → v1.0.3 升级强烈建议**：v1.0.2 的 `http_total_timeout_seconds` 默认仅 120 s，长时思考请求会在服务端硬切断；v1.0.3 起默认 7200 s（含 `StreamIdleTimeout` / `MaxKeepaliveCount` / 单飞 `inflightWaitTimeout` 全套对齐）。Pro 推理模型 + 长上下文场景几乎必须升级到 v1.0.3 才能避免服务端 120 s 限制叠加 Claude Code 客户端 120 s 限制造成的双重斩首。
+
+> **v1.0.8 升级建议（Claude Code 用户必读）**：若你开启了 WebUI"结束后全部删除"，v1.0.8 以前的版本在 Claude Code 使用 `/v1/messages` 端点时不执行远程会话清理（Issue #20），会话在 DeepSeek Web 侧持续堆积。升级到 v1.0.8 可彻底解决此问题。
 
 ---
 
@@ -608,6 +619,8 @@ Claude Code v2.x 相对于"标准 Anthropic SDK 用法"的核心超集特性：
 | P0-4 | thinking 块先于 tool_use 块输出（`closeThinkingBlock` 在 `emitTextDelta` 前调用） | `stream_runtime_emit.go:185` | ✅ 已实现 |
 | P0-5 | `/v1/messages/count_tokens` 端点存在并返回 `{"input_tokens": N}` | `handler_tokens.go`, `handler_routes.go` | ✅ 已实现（估算） |
 | P0-6 | 错误信封格式 `{"type":"error","error":{"type":"...","message":"..."}}` | `handler_errors.go` | ✅ 已实现（需确认 `overloaded_error` type 字符串） |
+| P0-7 | WebUI"结束后全部删除"在 `/v1/messages` 正确触发远程会话清理（Issue #20） | claude handler deferred cleanup，`AutoDeleteRemoteSession` | ✅ **v1.0.8 已修复** |
+| P0-8 | 上游 429 时触发账号切换（不消耗重试配额） | 账号池调度层 | ✅ **v1.0.12 已实现** |
 
 ### P1 — 存在缺口，应尽快修复
 
