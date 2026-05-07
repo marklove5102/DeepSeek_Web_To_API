@@ -121,6 +121,15 @@ type Stats struct {
 // runtime knob like timeout / fail_open / model / TTL) via PUT
 // /admin/settings takes effect for the very next request — no restart.
 //
+// v1.0.18: when the OPERATOR-VISIBLE audit semantics change (model
+// swap, fail_open flip, enabled flip), the LRU cache is invalidated so
+// stale verdicts produced by an earlier (potentially weaker / mis-
+// configured) model don't get reused. Without this an operator who
+// upgrades from flash-nothinking to pro-nothinking still sees the old
+// verdicts until each cache entry's TTL expires (default 10 min) or
+// the process restarts. Detection is "any change in (Enabled, Model,
+// FailOpen)" tracked under c.mu.
+//
 // Two fields stay frozen at construction because they back finite-size
 // runtime objects: CacheMaxEntries (LRU capacity) and MaxConcurrent
 // (semaphore depth). Those still need a restart if the operator wants
@@ -144,6 +153,24 @@ type LLMChecker struct {
 	concurrentInflight  int64
 	totalLatencyMs      int64
 	latencyMeasureCount int64
+
+	// lastSemantics tracks (Enabled, Model, FailOpen) so we can detect a
+	// hot-reload change and purge the cache. Empty zero-value is fine for
+	// the very first call.
+	lastSemantics auditSemantics
+}
+
+// auditSemantics is the subset of Config that, when changed, invalidates
+// previously-cached verdicts. Cache size / TTL / min-max chars don't
+// invalidate (they affect storage / inputs but not the verdict mapping).
+type auditSemantics struct {
+	Enabled  bool
+	Model    string
+	FailOpen bool
+}
+
+func semanticsFor(cfg Config) auditSemantics {
+	return auditSemantics{Enabled: cfg.Enabled, Model: cfg.Model, FailOpen: cfg.FailOpen}
 }
 
 // ConfigSource lets the checker read the current operator-facing
@@ -194,6 +221,27 @@ func (c *LLMChecker) currentConfig() Config {
 	return c.source.SafetyLLMCheckConfig()
 }
 
+// maybePurgeCacheOnSemanticsChange compares the current audit semantics
+// (Enabled, Model, FailOpen) to the last call's. If they changed —
+// typically when the operator flips the toggle in the WebUI or upgrades
+// model from flash-nothinking to pro-nothinking — the LRU cache is
+// invalidated so a previous model's verdicts don't get replayed.
+//
+// The first call sees a zero-value lastSemantics; if cfg.Enabled is
+// already true we still treat that as a change and purge (defensive —
+// the previous process's cache file does not persist, but a hot-import
+// of config could conceivably stage state).
+func (c *LLMChecker) maybePurgeCacheOnSemanticsChange(cfg Config) {
+	current := semanticsFor(cfg)
+	c.mu.Lock()
+	changed := c.lastSemantics != current
+	c.lastSemantics = current
+	c.mu.Unlock()
+	if changed {
+		c.cache.purge()
+	}
+}
+
 // Enabled reports whether the checker is currently active. Reads live
 // config so a WebUI flip propagates immediately.
 func (c *LLMChecker) Enabled() bool {
@@ -208,6 +256,7 @@ func (c *LLMChecker) Enabled() bool {
 // rest of the request uses (no separate audit-account pool to manage).
 func (c *LLMChecker) CheckWithAuth(ctx context.Context, a *auth.RequestAuth, text string) (Verdict, error) {
 	cfg := c.currentConfig()
+	c.maybePurgeCacheOnSemanticsChange(cfg)
 	if !cfg.Enabled || c.doer == nil {
 		return Verdict{Violation: false}, nil
 	}

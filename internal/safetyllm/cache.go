@@ -78,3 +78,13 @@ func (c *lruCache) size() int {
 	defer c.mu.Unlock()
 	return c.order.Len()
 }
+
+// purge drops every entry. Used by LLMChecker when audit semantics
+// (model, fail_open, enabled) change — stale verdicts from a previous
+// model would otherwise be replayed to the new model's callers.
+func (c *lruCache) purge() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.items = make(map[string]*list.Element, c.max)
+	c.order.Init()
+}

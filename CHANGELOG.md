@@ -1,5 +1,16 @@
 # 更新日志
 
+## 2026-05-08 (1.0.18)
+
+v1.0.18 修生产观察到的 cache 污染：运营方在 WebUI 把审核 model 从 `deepseek-v4-flash-nothinking` 升级到 `deepseek-v4-pro-nothinking` 后，**旧 model 写下的 violation=true 缓存条目继续 hit**，让 "你是谁？" 这种合法短句在新 model 该判通过的情况下仍被 403 拦——直到 LRU TTL 过期或进程重启才恢复。
+
+### 子段 v1.0.18 修复
+
+- **审核语义变更触发 cache 自动失效**：[`internal/safetyllm/checker.go`](internal/safetyllm/checker.go) `LLMChecker` 新增 `lastSemantics` 字段（仅记录 `Enabled / Model / FailOpen` 三项）。`CheckWithAuth` 入口先调 `maybePurgeCacheOnSemanticsChange`：若当前 cfg 的语义与上次记录不同，立即 `cache.purge()` 清空 LRU 全部条目，然后正常进入审核流程。语义不变时跳过——零开销。`min/max input chars` / `cache_ttl` / `cache_max_entries` 这种纯存储 / 输入裁剪参数变化**不**触发清空（不影响 verdict 映射）。
+- **`internal/safetyllm/cache.go` 新增 `purge()`**：清空内部 map + list（保留容量上限不变）。
+- **回归测试 2 组**：① `TestCheckerPurgesCacheWhenModelChanges` 用 `mutableConfigSource` 模拟运营方在 WebUI 改 model：先 cache "violation"，再切 model + 翻转 stub 输出，断言新调用打到 upstream 拿新 verdict 而非命中旧 cache。② `TestCheckerPurgesCacheWhenEnabledFlipped` 验证 enable 翻转也走相同语义清空。
+- **prod 表现**：本版本部署后，运营方下次任意改 model / fail_open / enabled，cache 立即清空，无需手动 `systemctl restart`。
+
 ## 2026-05-08 (1.0.17)
 
 v1.0.17 修 LLM 安全审核在 prod 实测的两个症结：① **自伤误判**——网关自己注入的 thinking-effort banner 被审核 LLM 当作"对抗性指令"判违规，让 `hello` 这种正常请求被拦；② **明显越狱漏检**——deepseek-v4-flash-nothinking 被 `<RolePlay>` / `<deployInfo>` / "忽略之前指示" 等伪饰话术劫持，输出"不违规"放行 R14 + DAN 攻击。

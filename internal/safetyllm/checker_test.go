@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -299,4 +300,92 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// v1.0.18: when the operator flips audit semantics (model swap,
+// enabled toggle, fail_open flip) the cache must be purged so stale
+// verdicts produced by a previous (potentially weaker) model are not
+// replayed. Production observed flash-nothinking → pro-nothinking
+// upgrade leaving "你是谁？ → violation" cached, blocking benign
+// requests on the new model until TTL expired.
+type mutableConfigSource struct {
+	mu  sync.Mutex
+	cfg Config
+}
+
+func (m *mutableConfigSource) SafetyLLMCheckConfig() Config {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cfg
+}
+func (m *mutableConfigSource) set(cfg Config) {
+	m.mu.Lock()
+	m.cfg = cfg
+	m.mu.Unlock()
+}
+
+func TestCheckerPurgesCacheWhenModelChanges(t *testing.T) {
+	doer := &stubDoer{output: "违规"}
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	cfg.Model = "deepseek-v4-flash-nothinking"
+	cfg.MinInputChars = 5
+	src := &mutableConfigSource{cfg: cfg}
+	checker := NewLLMCheckerWithSource(src, doer)
+
+	// First call → upstream returns violation, cache stores it.
+	v, _ := checker.CheckWithAuth(context.Background(), &auth.RequestAuth{}, "hello world")
+	if !v.Violation {
+		t.Fatalf("first call: expected violation, got %#v", v)
+	}
+	if doer.calls.Load() != 1 {
+		t.Fatalf("expected 1 upstream call, got %d", doer.calls.Load())
+	}
+
+	// Same input again — would normally cache-hit and skip upstream.
+	doer.output = "不违规"
+	_, _ = checker.CheckWithAuth(context.Background(), &auth.RequestAuth{}, "hello world")
+	if doer.calls.Load() != 1 {
+		t.Fatalf("expected cache-hit (no new upstream call), got %d total", doer.calls.Load())
+	}
+
+	// Operator swaps model — cache must drop, next call hits upstream.
+	cfg.Model = "deepseek-v4-pro-nothinking"
+	src.set(cfg)
+	v2, _ := checker.CheckWithAuth(context.Background(), &auth.RequestAuth{}, "hello world")
+	if v2.Violation {
+		t.Fatalf("model-swap should drop cache, new model returns 不违规, got %#v", v2)
+	}
+	if doer.calls.Load() != 2 {
+		t.Fatalf("expected new upstream call after model swap, total=%d", doer.calls.Load())
+	}
+}
+
+func TestCheckerPurgesCacheWhenEnabledFlipped(t *testing.T) {
+	doer := &stubDoer{output: "违规"}
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	cfg.MinInputChars = 5
+	src := &mutableConfigSource{cfg: cfg}
+	checker := NewLLMCheckerWithSource(src, doer)
+
+	_, _ = checker.CheckWithAuth(context.Background(), &auth.RequestAuth{}, "hello world")
+	if doer.calls.Load() != 1 {
+		t.Fatalf("expected 1 upstream call seed, got %d", doer.calls.Load())
+	}
+
+	// Disable then re-enable — new tenancy semantics; cache should be empty.
+	cfg.Enabled = false
+	src.set(cfg)
+	_, _ = checker.CheckWithAuth(context.Background(), &auth.RequestAuth{}, "hello world")
+	cfg.Enabled = true
+	doer.output = "不违规"
+	src.set(cfg)
+	v, _ := checker.CheckWithAuth(context.Background(), &auth.RequestAuth{}, "hello world")
+	if v.Violation {
+		t.Fatalf("re-enable should drop pre-disable cache, got %#v", v)
+	}
+	if doer.calls.Load() != 2 {
+		t.Fatalf("expected fresh upstream call after re-enable, total=%d", doer.calls.Load())
+	}
 }
