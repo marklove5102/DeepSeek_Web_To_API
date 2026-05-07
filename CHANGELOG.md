@@ -1,5 +1,9 @@
 # 更新日志
 
+## 2026-05-07 (1.0.9)
+
+v1.0.9 是 v1.0.8 的纯 lint-fix patch 版本：v1.0.8 release-artifacts CI 因为 [`internal/httpapi/claude/handler_messages_direct_auto_delete_test.go`](internal/httpapi/claude/handler_messages_direct_auto_delete_test.go) 第 21 行的 stub 方法签名与下一行三空格对齐差一列被 gofmt 拦截。功能性代码完全等价（v1.0.8 main commit 已部署到 prod 且 healthz 200，行为正确），本版本仅修 lint 让 GitHub Release 二进制能正确产出。无需重新部署 prod。
+
 ## 2026-05-07 (1.0.8)
 
 v1.0.8 是定点 bug 修复版本：修复 [GitHub Issue #20](https://github.com/Meow-Calculations/DeepSeek_Web_To_API/issues/20)（@ManuXia 反馈）—— 开启"会话删除策略（结束后全部删除 / 单删）"后实际上不删除。VERSION 从 `1.0.7` 升到 `1.0.8`。
