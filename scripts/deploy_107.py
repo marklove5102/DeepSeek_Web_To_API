@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deploy ds2api binary to 154.219.103.107 (prod).
+"""Deploy ds2api binary to the prod host specified by env DST_HOST.
 
 Compiles the linux/amd64 binary first (with ldflags injecting the version
 from the repo-root VERSION file) so the deployed process reports the right
@@ -14,8 +14,11 @@ import hashlib, io, os, subprocess, sys, time, paramiko
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
-HOST = "154.219.103.107"
-USER = "root"
+HOST = os.environ.get("DST_HOST", "").strip()
+USER = os.environ.get("DST_USER", "root").strip()
+if not HOST:
+    print("DST_HOST env required (e.g. DST_HOST=10.0.0.1 DST_PASSWORD=... python3 scripts/deploy_107.py)", file=__import__('sys').stderr)
+    raise SystemExit(2)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
 BUILD_DIR = os.path.join(REPO_ROOT, "build")
