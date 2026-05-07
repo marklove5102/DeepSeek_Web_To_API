@@ -34,6 +34,7 @@ type DeepSeekCaller interface {
 	DeleteAllSessionsForToken(ctx context.Context, token string) error
 }
 
+
 type ConfigReader interface {
 	ModelAliases() map[string]string
 	CompatWideInputStrictOutput() bool
@@ -50,6 +51,10 @@ type ConfigReader interface {
 	CurrentInputFileMinChars() int
 	ThinkingInjectionEnabled() bool
 	ThinkingInjectionPrompt() string
+	// SafetyBlockMessage returns the message rendered to a client when
+	// the v1.0.14+ LLM safety reviewer blocks a request. Empty falls
+	// back to the handler default.
+	SafetyBlockMessage() string
 	// RemoteFileUploadEnabled controls whether the service forwards inline
 	// attachments (and the current-input-file transcript) to the upstream
 	// DeepSeek upload_file endpoint. When false (the production default),

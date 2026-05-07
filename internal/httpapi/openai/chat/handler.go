@@ -10,6 +10,7 @@ import (
 	"DeepSeek_Web_To_API/internal/httpapi/openai/history"
 	"DeepSeek_Web_To_API/internal/httpapi/openai/shared"
 	"DeepSeek_Web_To_API/internal/promptcompat"
+	"DeepSeek_Web_To_API/internal/safetyllm"
 	"DeepSeek_Web_To_API/internal/toolcall"
 	"DeepSeek_Web_To_API/internal/toolstream"
 )
@@ -23,6 +24,7 @@ type Handler struct {
 	Auth        shared.AuthResolver
 	DS          shared.DeepSeekCaller
 	ChatHistory *chathistory.Store
+	SafetyLLM   safetyllm.Checker
 }
 
 func (h *Handler) compatStripReferenceMarkers() bool {

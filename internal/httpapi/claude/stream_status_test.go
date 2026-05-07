@@ -27,6 +27,8 @@ func (streamStatusClaudeStoreStub) CompatStripReferenceMarkers() bool { return t
 
 func (streamStatusClaudeStoreStub) AutoDeleteMode() string { return "none" }
 
+func (streamStatusClaudeStoreStub) SafetyBlockMessage() string { return "" }
+
 func captureClaudeStatusMiddleware(statuses *[]int) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

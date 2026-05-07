@@ -9,6 +9,7 @@ type mockClaudeConfig struct {
 func (m mockClaudeConfig) ModelAliases() map[string]string { return m.aliases }
 func (mockClaudeConfig) CompatStripReferenceMarkers() bool { return true }
 func (mockClaudeConfig) AutoDeleteMode() string            { return "none" }
+func (mockClaudeConfig) SafetyBlockMessage() string        { return "" }
 
 func TestNormalizeClaudeRequestUsesGlobalAliasMapping(t *testing.T) {
 	req := map[string]any{

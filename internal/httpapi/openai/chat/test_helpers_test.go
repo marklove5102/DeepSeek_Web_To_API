@@ -42,6 +42,7 @@ func (m mockOpenAIConfig) AutoDeleteMode() string {
 	return m.autoDeleteMode
 }
 func (m mockOpenAIConfig) AutoDeleteSessions() bool  { return false }
+func (m mockOpenAIConfig) SafetyBlockMessage() string { return "" }
 func (m mockOpenAIConfig) HistorySplitEnabled() bool { return m.historySplitEnabled }
 func (m mockOpenAIConfig) HistorySplitTriggerAfterTurns() int {
 	if m.historySplitTurns <= 0 {

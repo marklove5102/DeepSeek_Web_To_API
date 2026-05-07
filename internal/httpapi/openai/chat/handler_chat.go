@@ -15,6 +15,7 @@ import (
 	"DeepSeek_Web_To_API/internal/httpapi/openai/shared"
 	"DeepSeek_Web_To_API/internal/httpapi/requestbody"
 	"DeepSeek_Web_To_API/internal/promptcompat"
+	"DeepSeek_Web_To_API/internal/safetyllm"
 	"DeepSeek_Web_To_API/internal/sse"
 	streamengine "DeepSeek_Web_To_API/internal/stream"
 )
@@ -110,6 +111,18 @@ func (h *Handler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if historySession != nil {
 		historySession.updateHistoryText(stdReq.HistoryText)
 		historySession.updateCurrentInputState(stdReq)
+	}
+
+	// v1.0.14: LLM-based binary safety check after auth + CIF assembly so
+	// the audited text matches what we'd send upstream. Pre-CIF we'd miss
+	// content the operator considers part of the conversation; post-CIF
+	// we get the full prompt the model would actually see.
+	if shared.RunSafetyCheckAndBlock(r.Context(), h.SafetyLLM, a, stdReq.FinalPrompt, w, h.Store.SafetyBlockMessage(), func(_ safetyllm.Verdict) {
+		if historySession != nil {
+			historySession.error(http.StatusForbidden, "blocked by safety policy", "error", "policy_blocked", "")
+		}
+	}) {
+		return
 	}
 
 	sessionID, err = h.DS.CreateSession(r.Context(), a, 3)

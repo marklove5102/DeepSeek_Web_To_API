@@ -21,6 +21,7 @@ type claudeAutoDeleteStoreStub struct {
 func (claudeAutoDeleteStoreStub) ModelAliases() map[string]string   { return nil }
 func (claudeAutoDeleteStoreStub) CompatStripReferenceMarkers() bool { return true }
 func (s claudeAutoDeleteStoreStub) AutoDeleteMode() string          { return s.mode }
+func (claudeAutoDeleteStoreStub) SafetyBlockMessage() string        { return "" }
 
 // claudeAutoDeleteDSStub mirrors directClaudeDSStub but counts the delete
 // invocations so the test can assert the auto-delete defer fired once.

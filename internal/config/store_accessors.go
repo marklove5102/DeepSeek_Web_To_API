@@ -76,6 +76,15 @@ func (s *Store) AutoDeleteMode() string {
 	return "none"
 }
 
+// SafetyBlockMessage returns the operator-configured message returned to
+// clients when a safety policy blocks a request. Empty string falls back
+// to the handler default.
+func (s *Store) SafetyBlockMessage() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return strings.TrimSpace(s.cfg.Safety.BlockMessage)
+}
+
 func (s *Store) AdminPasswordHash() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

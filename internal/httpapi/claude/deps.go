@@ -32,6 +32,9 @@ type ConfigReader interface {
 	// Issue #20 fix: handler reads the snapshot to decide whether to
 	// schedule an upstream session delete after the request completes.
 	AutoDeleteMode() string
+	// SafetyBlockMessage returns the operator-configured response body
+	// when v1.0.14+ LLM safety review blocks a request.
+	SafetyBlockMessage() string
 }
 
 type OpenAIChatRunner interface {

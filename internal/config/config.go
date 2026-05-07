@@ -196,20 +196,37 @@ type ResponseCacheConfig struct {
 }
 
 type SafetyConfig struct {
-	Enabled                *bool               `json:"enabled,omitempty"`
-	BlockMessage           string              `json:"block_message,omitempty"`
-	BlockedIPs             []string            `json:"blocked_ips,omitempty"`
-	AllowedIPs             []string            `json:"allowed_ips,omitempty"`
-	BlockedConversationIDs []string            `json:"blocked_conversation_ids,omitempty"`
-	BannedContent          []string            `json:"banned_content,omitempty"`
-	BannedRegex            []string            `json:"banned_regex,omitempty"`
-	Jailbreak              JailbreakConfig     `json:"jailbreak,omitempty"`
-	AutoBan                SafetyAutoBanConfig `json:"auto_ban,omitempty"`
-	// DisabledBuiltinRules lets the operator silence specific built-in
-	// rules (see internal/config/builtin_safety.go) by their stable ID.
-	// Rules with AllowDisable=false (CSAM / furry / bestiality / persona-
-	// escape jailbreaks) are always-on regardless of this list.
-	DisabledBuiltinRules []string `json:"disabled_builtin_rules,omitempty"`
+	Enabled                *bool    `json:"enabled,omitempty"`
+	BlockMessage           string   `json:"block_message,omitempty"`
+	BlockedIPs             []string `json:"blocked_ips,omitempty"`
+	AllowedIPs             []string `json:"allowed_ips,omitempty"`
+	BlockedConversationIDs []string `json:"blocked_conversation_ids,omitempty"`
+	// BannedContent / BannedRegex / Jailbreak / DisabledBuiltinRules are
+	// retained as JSON fields for backward-compat with v1.0.13- configs
+	// but are NOT consumed by requestguard as of v1.0.14. Content-level
+	// review is performed by SafetyLLMCheck below.
+	BannedContent        []string             `json:"banned_content,omitempty"`
+	BannedRegex          []string             `json:"banned_regex,omitempty"`
+	Jailbreak            JailbreakConfig      `json:"jailbreak,omitempty"`
+	DisabledBuiltinRules []string             `json:"disabled_builtin_rules,omitempty"`
+	AutoBan              SafetyAutoBanConfig  `json:"auto_ban,omitempty"`
+	LLMCheck             SafetyLLMCheckConfig `json:"llm_check,omitempty"`
+}
+
+// SafetyLLMCheckConfig drives the v1.0.14+ binary-verdict LLM safety
+// reviewer (internal/safetyllm). When Enabled, every chat / responses /
+// messages request runs through deepseek-v4-flash-nothinking after auth
+// to get a "violation" / "ok" verdict before reaching upstream.
+type SafetyLLMCheckConfig struct {
+	Enabled         *bool  `json:"enabled,omitempty"`
+	Model           string `json:"model,omitempty"`
+	TimeoutMs       int    `json:"timeout_ms,omitempty"`
+	FailOpen        *bool  `json:"fail_open,omitempty"`
+	CacheTTLSeconds int    `json:"cache_ttl_seconds,omitempty"`
+	CacheMaxEntries int    `json:"cache_max_entries,omitempty"`
+	MinInputChars   int    `json:"min_input_chars,omitempty"`
+	MaxInputChars   int    `json:"max_input_chars,omitempty"`
+	MaxConcurrent   int    `json:"max_concurrent,omitempty"`
 }
 
 type JailbreakConfig struct {

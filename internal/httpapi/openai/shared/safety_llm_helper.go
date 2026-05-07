@@ -1,0 +1,51 @@
+package shared
+
+import (
+	"context"
+	"net/http"
+
+	"DeepSeek_Web_To_API/internal/auth"
+	"DeepSeek_Web_To_API/internal/safetyllm"
+)
+
+// RunSafetyCheckAndBlock is the shared "run safety check, block if
+// violation" helper used by /v1/chat/completions, /v1/responses, and
+// /v1/messages handlers. Returns true when the caller must halt
+// (response already written) or false when the request should proceed
+// upstream.
+//
+// nil checker / Enabled()==false → no-op (returns false, proceed).
+//
+// Block path: write 403 with the operator-configured block_message
+// (falls back to a sane default), set finish_reason via
+// historySession.Error so chat_history records it as policy_blocked
+// (FailureRateExcludedStatusCodes ignores 403 → success-rate metric
+// stays clean).
+func RunSafetyCheckAndBlock(ctx context.Context, checker safetyllm.Checker, a *auth.RequestAuth, text string, w http.ResponseWriter, blockMessage string, onBlock func(verdict safetyllm.Verdict)) bool {
+	if checker == nil || !checker.Enabled() {
+		return false
+	}
+	verdict, err := checker.CheckWithAuth(ctx, a, text)
+	if err != nil {
+		// safetyllm itself never returns err in fail-open; if we got one
+		// it's a fail-closed verdict already shaped as Violation=true.
+		// Treat as block.
+	}
+	if !verdict.Violation {
+		return false
+	}
+	if onBlock != nil {
+		onBlock(verdict)
+	}
+	if blockMessage == "" {
+		blockMessage = "该请求触发了内容安全策略，已被拒绝。"
+	}
+	WriteJSON(w, http.StatusForbidden, map[string]any{
+		"error": map[string]any{
+			"message": blockMessage,
+			"type":    "policy_blocked",
+			"code":    "llm_safety_blocked",
+		},
+	})
+	return true
+}

@@ -122,6 +122,17 @@ func (h *Handler) safetyResponse(legacy config.SafetyConfig) map[string]any {
 			"threshold":      autoBanThreshold,
 			"window_seconds": autoBanWindow,
 		},
+		"llm_check": map[string]any{
+			"enabled":           legacy.LLMCheck.Enabled != nil && *legacy.LLMCheck.Enabled,
+			"model":             legacy.LLMCheck.Model,
+			"timeout_ms":        legacy.LLMCheck.TimeoutMs,
+			"fail_open":         legacy.LLMCheck.FailOpen == nil || *legacy.LLMCheck.FailOpen,
+			"cache_ttl_seconds": legacy.LLMCheck.CacheTTLSeconds,
+			"cache_max_entries": legacy.LLMCheck.CacheMaxEntries,
+			"min_input_chars":   legacy.LLMCheck.MinInputChars,
+			"max_input_chars":   legacy.LLMCheck.MaxInputChars,
+			"max_concurrent":    legacy.LLMCheck.MaxConcurrent,
+		},
 	}
 }
 

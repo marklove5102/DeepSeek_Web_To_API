@@ -291,6 +291,37 @@ func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *confi
 				cfg.AutoBan.WindowSeconds = intFrom(v)
 			}
 		}
+		if llmRaw, ok := raw["llm_check"].(map[string]any); ok {
+			if v, exists := llmRaw["enabled"]; exists {
+				b := boolFrom(v)
+				cfg.LLMCheck.Enabled = &b
+			}
+			if v, exists := llmRaw["model"]; exists {
+				cfg.LLMCheck.Model = strings.TrimSpace(fmt.Sprintf("%v", v))
+			}
+			if v, exists := llmRaw["timeout_ms"]; exists {
+				cfg.LLMCheck.TimeoutMs = intFrom(v)
+			}
+			if v, exists := llmRaw["fail_open"]; exists {
+				b := boolFrom(v)
+				cfg.LLMCheck.FailOpen = &b
+			}
+			if v, exists := llmRaw["cache_ttl_seconds"]; exists {
+				cfg.LLMCheck.CacheTTLSeconds = intFrom(v)
+			}
+			if v, exists := llmRaw["cache_max_entries"]; exists {
+				cfg.LLMCheck.CacheMaxEntries = intFrom(v)
+			}
+			if v, exists := llmRaw["min_input_chars"]; exists {
+				cfg.LLMCheck.MinInputChars = intFrom(v)
+			}
+			if v, exists := llmRaw["max_input_chars"]; exists {
+				cfg.LLMCheck.MaxInputChars = intFrom(v)
+			}
+			if v, exists := llmRaw["max_concurrent"]; exists {
+				cfg.LLMCheck.MaxConcurrent = intFrom(v)
+			}
+		}
 		if err := config.ValidateSafetyConfig(*cfg); err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
 		}

@@ -9,6 +9,7 @@ import (
 	"DeepSeek_Web_To_API/internal/chathistory"
 	"DeepSeek_Web_To_API/internal/config"
 	dsprotocol "DeepSeek_Web_To_API/internal/deepseek/protocol"
+	"DeepSeek_Web_To_API/internal/safetyllm"
 	"DeepSeek_Web_To_API/internal/util"
 )
 
@@ -16,10 +17,11 @@ import (
 var writeJSON = util.WriteJSON
 
 type Handler struct {
-	Store  ConfigReader
-	Auth   AuthResolver
-	DS     DeepSeekCaller
-	OpenAI OpenAIChatRunner
+	Store     ConfigReader
+	Auth      AuthResolver
+	DS        DeepSeekCaller
+	OpenAI    OpenAIChatRunner
+	SafetyLLM safetyllm.Checker
 
 	ChatHistory *chathistory.Store
 }

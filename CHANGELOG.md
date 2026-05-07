@@ -1,5 +1,19 @@
 # 更新日志
 
+## 2026-05-07 (1.0.14)
+
+v1.0.14 把 v1.0.13 全套 substring / regex / 越狱模式默认违禁词清单**全部删除**，改为基于 deepseek-v4-flash-nothinking 的二态 LLM 安全审核（"违规" / "不违规"）。理由：substring 匹配在自然中英文 prose 上误判率太高（含合法的医学讨论、新闻报道、安全研究、教育内容），运营方反馈不可接受。VERSION 从 `1.0.13` 升到 `1.0.14`。
+
+### 子段 v1.0.14 增量
+
+- **新建 `internal/safetyllm/` 包**：[`checker.go`](internal/safetyllm/checker.go) `LLMChecker` + `Checker` interface + `Verdict{Violation, Cached, LatencyMs, FailOpen}`；[`prompt.go`](internal/safetyllm/prompt.go) 二态审核 prompt（仅输出"违规" / "不违规"两个字，三引号围栏防止 user 注入劫持审核 LLM）+ `parseBinaryVerdict` 容错解析（支持英文 `violation` / `OK` / `compliant` 后备 + 标点容忍）；[`cache.go`](internal/safetyllm/cache.go) thread-safe LRU + 绝对时间 TTL 缓存（key=sha256(input)，10 min TTL，10000 条上限）；[`deepseek_doer.go`](internal/safetyllm/deepseek_doer.go) `DeepSeekDoer` 适配器封装 dsclient.Client + sse 收集，复用 caller 的 `auth.RequestAuth` 跑审核（不另起独立账号池）；[`checker_test.go`](internal/safetyllm/checker_test.go) 9 个单测覆盖 OK/违规/缓存命中/sub-threshold 跳过/upstream 错误 fail-open/parse 失败 fail-open/disabled no-op/超长截断/parser 容错。Concurrency semaphore 默认 16，`MinInputChars=30`（< 30 字直接放行不送审，避免 trivial 短文本浪费配额），`MaxInputChars=8000`（超长输入头尾保留 + 中间删除）。
+- **删除 v1.0.13 内置违禁清单**：`internal/config/builtin_safety.go` + `builtin_safety_test.go` 全部删除。`SafetyConfig.BannedContent` / `BannedRegex` / `Jailbreak.Patterns` / `DisabledBuiltinRules` 字段保留以便 v1.0.13- 配置文件不报错，但 [`internal/requestguard/guard.go`](internal/requestguard/guard.go) `evaluate` + `buildPolicy` 不再消费这些字段。`policyCache.mergeSafetySources` 不再调 `Effective*` 方法。`shouldCountAutoBan` 加 `llm_safety_blocked` 触发 auto_ban 计数。requestguard 现在只做 IP / 会话 ID 黑白名单 + auto_ban tracker（cheap、无需 LLM）。
+- **`SafetyConfig.LLMCheck` 新字段**：[`internal/config/config.go`](internal/config/config.go) 加 `SafetyLLMCheckConfig{Enabled, Model, TimeoutMs, FailOpen, CacheTTLSeconds, CacheMaxEntries, MinInputChars, MaxInputChars, MaxConcurrent}`；[`internal/httpapi/admin/settings/handler_settings_parse.go`](internal/httpapi/admin/settings/handler_settings_parse.go) 解析 `safety.llm_check.*`；[`handler_settings_read.go`](internal/httpapi/admin/settings/handler_settings_read.go) GET 响应回填 llm_check 节点；hot-reload 沿用 v1.0.7 链路（PUT /admin/settings → Store.Update → 下次 LLMChecker 实例创建生效，**当前实现需要 restart 才能切换 enabled 状态**，下版本会做无重启切换）。
+- **`SafetyChecker` hook 进入 chat / responses / claude handler**：[`internal/httpapi/openai/shared/safety_llm_helper.go`](internal/httpapi/openai/shared/safety_llm_helper.go) `RunSafetyCheckAndBlock` 共享 helper 在 Auth.Determine + CIF assembly 完成后、CreateSession 之前对 `stdReq.FinalPrompt` 做审核；命中违规 → 403 + finish_reason=`policy_blocked` + code=`llm_safety_blocked`（仍走 401/403/502/504/524 排除清单不计入失败率）。chat ([`handler_chat.go`](internal/httpapi/openai/chat/handler_chat.go)) / responses ([`responses_handler.go`](internal/httpapi/openai/responses/responses_handler.go)) / claude ([`handler_messages_direct.go`](internal/httpapi/claude/handler_messages_direct.go)) 三处都 hook 进了 `SafetyLLM safetyllm.Checker` 字段。Gemini 通过 chat handler 转译间接享受。
+- **`SafetyBlockMessage()` 暴露给 ConfigReader**：[`internal/config/store_accessors.go`](internal/config/store_accessors.go) + 各 handler 包 `ConfigReader` interface + 全部测试 mock 同步加方法。
+- **删除两个失效测试**：[`internal/requestguard/guard_test.go`](internal/requestguard/guard_test.go) 的 `TestMiddlewareBlocksConfiguredContent` 与 `TestAutoBanTripsAfterRepeatedContentViolations` 与 v1.0.13 substring 机制绑死，已删除；auto-ban 语义在新机制下基于 `llm_safety_blocked` verdict 触发，覆盖在 safetyllm 单测层。
+- **运营迁移说明**：升级 v1.0.14 后，**默认 enabled=false**，content-level 审核完全关闭直到运营方在 WebUI 启用 `safety.llm_check.enabled=true`。v1.0.13 部署在 prod 的 ~140 banned_content + 35 banned_regex + 151 jailbreak.patterns 列表仍可在 WebUI 看到（保留为 JSON 字段）但运行时被忽略，**可直接清空**。IP 黑白名单 + 自动拉黑 + auto_ban 等不变。
+
 ## 2026-05-07 (1.0.13)
 
 v1.0.13 把先前需要运营方手动通过 PUT /admin/settings 部署的安全规则（违禁词 + 越狱模式）**内置到二进制**作为出厂默认安全底线，运营方仍可在 WebUI 自定义追加 / 屏蔽（除几条不可关闭的核心红线）。同时强化思考-注入 playbook 的工具调用合规判定。VERSION 从 `1.0.12` 升到 `1.0.13`。

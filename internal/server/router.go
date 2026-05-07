@@ -32,6 +32,7 @@ import (
 	"DeepSeek_Web_To_API/internal/requestguard"
 	"DeepSeek_Web_To_API/internal/requestmeta"
 	"DeepSeek_Web_To_API/internal/responsecache"
+	"DeepSeek_Web_To_API/internal/safetyllm"
 	"DeepSeek_Web_To_API/internal/safetystore"
 	"DeepSeek_Web_To_API/internal/webui"
 )
@@ -92,11 +93,18 @@ func NewApp() (*App, error) {
 	}
 
 	modelsHandler := &shared.ModelsHandler{Store: store}
-	chatHandler := &chat.Handler{Store: store, Auth: resolver, DS: dsClient, ChatHistory: chatHistoryStore}
-	responsesHandler := &responses.Handler{Store: store, Auth: resolver, DS: dsClient, ChatHistory: chatHistoryStore}
+	// v1.0.14: build the LLM-based safety checker. Doer wraps dsclient so
+	// the checker can reuse the caller's RequestAuth + managed account
+	// pool to run a fast deepseek-v4-flash-nothinking audit before the
+	// real upstream call. Disabled checker is a no-op (still injected so
+	// handlers can call CheckWithAuth unconditionally).
+	safetyLLMConfig := buildSafetyLLMConfig(store.Snapshot().Safety.LLMCheck)
+	safetyLLMChecker := safetyllm.NewLLMChecker(safetyLLMConfig, safetyllm.NewDeepSeekDoer(dsClient))
+	chatHandler := &chat.Handler{Store: store, Auth: resolver, DS: dsClient, ChatHistory: chatHistoryStore, SafetyLLM: safetyLLMChecker}
+	responsesHandler := &responses.Handler{Store: store, Auth: resolver, DS: dsClient, ChatHistory: chatHistoryStore, SafetyLLM: safetyLLMChecker}
 	filesHandler := &files.Handler{Store: store, Auth: resolver, DS: dsClient, ChatHistory: chatHistoryStore}
 	embeddingsHandler := &embeddings.Handler{Store: store, Auth: resolver, DS: dsClient, ChatHistory: chatHistoryStore}
-	claudeHandler := &claude.Handler{Store: store, Auth: resolver, DS: dsClient, OpenAI: chatHandler, ChatHistory: chatHistoryStore}
+	claudeHandler := &claude.Handler{Store: store, Auth: resolver, DS: dsClient, OpenAI: chatHandler, ChatHistory: chatHistoryStore, SafetyLLM: safetyLLMChecker}
 	geminiHandler := &gemini.Handler{Store: store, Auth: resolver, DS: dsClient, OpenAI: chatHandler}
 	protocolResponseCache := responsecache.New(responsecache.Options{
 		Dir:            store.ResponseCacheDir(),
@@ -552,4 +560,40 @@ func WriteUnhandledError(w http.ResponseWriter, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusInternalServerError)
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"type": "api_error", "message": "Internal Server Error", "detail": err.Error()}})
+}
+
+// buildSafetyLLMConfig translates the operator-facing
+// config.SafetyLLMCheckConfig snapshot into the runtime safetyllm.Config.
+// Default values come from safetyllm.DefaultConfig() so any field the
+// operator left unset stays at the safe default.
+func buildSafetyLLMConfig(src config.SafetyLLMCheckConfig) safetyllm.Config {
+	cfg := safetyllm.DefaultConfig()
+	if src.Enabled != nil {
+		cfg.Enabled = *src.Enabled
+	}
+	if model := strings.TrimSpace(src.Model); model != "" {
+		cfg.Model = model
+	}
+	if src.TimeoutMs > 0 {
+		cfg.TimeoutMs = src.TimeoutMs
+	}
+	if src.FailOpen != nil {
+		cfg.FailOpen = *src.FailOpen
+	}
+	if src.CacheTTLSeconds > 0 {
+		cfg.CacheTTLSeconds = src.CacheTTLSeconds
+	}
+	if src.CacheMaxEntries > 0 {
+		cfg.CacheMaxEntries = src.CacheMaxEntries
+	}
+	if src.MinInputChars > 0 {
+		cfg.MinInputChars = src.MinInputChars
+	}
+	if src.MaxInputChars > 0 {
+		cfg.MaxInputChars = src.MaxInputChars
+	}
+	if src.MaxConcurrent > 0 {
+		cfg.MaxConcurrent = src.MaxConcurrent
+	}
+	return cfg
 }

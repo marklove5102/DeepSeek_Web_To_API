@@ -315,13 +315,15 @@ func Middleware(opts Options) func(http.Handler) http.Handler {
 }
 
 // shouldCountAutoBan returns true for decision codes that correspond to a
-// content-side violation an attacker can deliberately trigger (banned
-// keywords / banned regex / jailbreak attempts). IP-blocked / conversation
-// -blocked outcomes are not counted: those are already terminal and do
-// not need an auto-ban escalation.
+// content-side violation an attacker can deliberately trigger (LLM
+// safety verdict in v1.0.14+, plus the legacy substring/regex/jailbreak
+// codes for already-recorded historical events). IP-blocked /
+// conversation-blocked outcomes are not counted: those are already
+// terminal and do not need an auto-ban escalation.
 func shouldCountAutoBan(code string) bool {
 	switch code {
-	case "content_blocked", "content_regex_blocked", "jailbreak_blocked":
+	case "llm_safety_blocked",
+		"content_blocked", "content_regex_blocked", "jailbreak_blocked":
 		return true
 	}
 	return false
@@ -413,13 +415,11 @@ func mergeSafetySources(cfg config.SafetyConfig, c *policyCache) config.SafetyCo
 			cfg.BlockedConversationIDs = appendUnique(cfg.BlockedConversationIDs, blockedConv)
 		}
 	}
-	// Merge in the binary's built-in safety catalogue last so the policy
-	// the guard sees is (builtin minus disabled-by-operator) ∪ (operator's
-	// own banned_content / banned_regex / jailbreak.patterns) ∪ (the
-	// dedicated SQLite stores). buildPolicy dedupes inside.
-	cfg.BannedContent = cfg.EffectiveBannedContent()
-	cfg.BannedRegex = cfg.EffectiveBannedRegex()
-	cfg.Jailbreak.Patterns = cfg.EffectiveJailbreakPatterns()
+	// v1.0.14: builtin safety catalogue (R14/furry/R18/crack/CTF/jailbreak
+	// substring + regex lists from v1.0.13) was removed. Operators reported
+	// unacceptably high false-positive rate on natural prose. Content-level
+	// review now flows through internal/safetyllm with a binary verdict.
+	// IP / conversation-id blocking + auto-ban remain on this fast path.
 	return cfg
 }
 
@@ -477,33 +477,12 @@ func buildPolicy(cfg config.SafetyConfig) policy {
 			p.blockedConversationIDs[strings.ToLower(id)] = struct{}{}
 		}
 	}
-	for _, item := range cfg.BannedContent {
-		item = strings.ToLower(strings.TrimSpace(item))
-		if item != "" {
-			p.bannedContent = append(p.bannedContent, item)
-		}
-	}
-	for _, pattern := range cfg.BannedRegex {
-		pattern = strings.TrimSpace(pattern)
-		if pattern == "" {
-			continue
-		}
-		if re, err := regexp.Compile(pattern); err == nil {
-			p.bannedRegex = append(p.bannedRegex, re)
-		}
-	}
-	if cfg.Jailbreak.Enabled != nil {
-		p.jailbreakEnabled = *cfg.Jailbreak.Enabled
-	} else {
-		// default-on when safety is enabled and operator left jailbreak unspecified
-		p.jailbreakEnabled = true
-	}
-	for _, item := range append(defaultJailbreakPatterns, cfg.Jailbreak.Patterns...) {
-		item = strings.ToLower(strings.TrimSpace(item))
-		if item != "" {
-			p.jailbreakPatterns = append(p.jailbreakPatterns, item)
-		}
-	}
+	// v1.0.14: substring banned_content / banned_regex / jailbreak.patterns
+	// were removed in favor of LLM-based binary safety review. The fields
+	// remain on SafetyConfig for backward-compatible JSON config files
+	// and WebUI display, but they are no longer compiled into a policy
+	// nor consulted by evaluate(). Operators wanting content-level review
+	// must enable safety.llm_check.enabled.
 	return p
 }
 
@@ -521,6 +500,17 @@ func parseIPMatcher(raw string) (ipMatcher, bool) {
 	return ipMatcher{}, false
 }
 
+// evaluate runs the FAST request-guard checks: IP block / conversation-id
+// block. Content / jailbreak / banned-regex matching was removed in v1.0.14
+// in favor of LLM-based binary review (internal/safetyllm). Operators
+// reported high false-positive rate from substring + regex matching on
+// natural prose; the LLM checker runs at the chat / responses / messages
+// handler entry instead, after Auth.Determine, so it has a real
+// RequestAuth + can budget upstream calls per-caller.
+//
+// IP / conv blocking stays here because (a) it's cheap, (b) it doesn't
+// need the LLM to make the decision, and (c) it must run before any
+// upstream call (LLM check itself) to short-circuit known-bad sources.
 func (p policy) evaluate(r *http.Request, body []byte, meta requestmeta.Metadata) decision {
 	if !p.enabled {
 		return decision{}
@@ -533,33 +523,8 @@ func (p policy) evaluate(r *http.Request, body []byte, meta requestmeta.Metadata
 			return decision{blocked: true, code: "conversation_blocked", detail: "conversation id is blocked"}
 		}
 	}
-	if isContentScanExempt(r) {
-		return decision{}
-	}
-	if len(body) == 0 || !requestBodyShouldBeRead(r) {
-		return decision{}
-	}
-	text := strings.ToLower(extractRequestText(body))
-	if text == "" {
-		return decision{}
-	}
-	for _, needle := range p.bannedContent {
-		if strings.Contains(text, needle) {
-			return decision{blocked: true, code: "content_blocked", detail: "request content matched banned content"}
-		}
-	}
-	for _, re := range p.bannedRegex {
-		if re.MatchString(text) {
-			return decision{blocked: true, code: "content_regex_blocked", detail: "request content matched banned regex"}
-		}
-	}
-	if p.jailbreakEnabled {
-		for _, needle := range p.jailbreakPatterns {
-			if strings.Contains(text, needle) {
-				return decision{blocked: true, code: "jailbreak_blocked", detail: "request content matched jailbreak policy"}
-			}
-		}
-	}
+	_ = body // body unused after content-scan removal; kept in signature for handler hook compatibility
+	_ = r
 	return decision{}
 }
 

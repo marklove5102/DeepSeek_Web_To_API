@@ -16,6 +16,7 @@ import (
 	openaishared "DeepSeek_Web_To_API/internal/httpapi/openai/shared"
 	"DeepSeek_Web_To_API/internal/prompt"
 	"DeepSeek_Web_To_API/internal/promptcompat"
+	"DeepSeek_Web_To_API/internal/safetyllm"
 	"DeepSeek_Web_To_API/internal/sse"
 	"DeepSeek_Web_To_API/internal/toolcall"
 	"DeepSeek_Web_To_API/internal/util"
@@ -81,6 +82,18 @@ func (h *Handler) handleDirectClaudeIfAvailable(w http.ResponseWriter, r *http.R
 	if historySession == nil {
 		historySession = historycapture.Start(h.ChatHistory, r, a, norm.Standard)
 	}
+
+	// v1.0.14: LLM-based binary safety check on the assembled standard
+	// prompt. Blocks return 403 with policy_blocked finish_reason; the
+	// caller's deferred AutoDeleteRemoteSession still fires cleanly.
+	if openaishared.RunSafetyCheckAndBlock(r.Context(), h.SafetyLLM, a, norm.Standard.FinalPrompt, w, h.Store.SafetyBlockMessage(), func(_ safetyllm.Verdict) {
+		if historySession != nil {
+			historySession.Error(http.StatusForbidden, "blocked by safety policy", "error", "policy_blocked", "")
+		}
+	}) {
+		return true
+	}
+
 	sessionID, err = h.DS.CreateSession(r.Context(), a, 3)
 	if err != nil {
 		sessionDetail := openaishared.SessionErrorDetail(err)

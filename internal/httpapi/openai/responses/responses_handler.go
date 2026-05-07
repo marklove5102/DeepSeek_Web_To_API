@@ -18,6 +18,7 @@ import (
 	"DeepSeek_Web_To_API/internal/httpapi/historycapture"
 	"DeepSeek_Web_To_API/internal/httpapi/openai/shared"
 	"DeepSeek_Web_To_API/internal/promptcompat"
+	"DeepSeek_Web_To_API/internal/safetyllm"
 	"DeepSeek_Web_To_API/internal/sse"
 	streamengine "DeepSeek_Web_To_API/internal/stream"
 )
@@ -143,6 +144,15 @@ func (h *Handler) Responses(w http.ResponseWriter, r *http.Request) {
 	recordCurrentInputMetrics(stdReq, cifDuration)
 	if historySession != nil {
 		historySession.UpdateCurrentInputState(stdReq)
+	}
+
+	// v1.0.14: LLM-based binary safety check.
+	if shared.RunSafetyCheckAndBlock(r.Context(), h.SafetyLLM, a, stdReq.FinalPrompt, w, h.Store.SafetyBlockMessage(), func(_ safetyllm.Verdict) {
+		if historySession != nil {
+			historySession.Error(http.StatusForbidden, "blocked by safety policy", "error", "policy_blocked", "")
+		}
+	}) {
+		return
 	}
 
 	sessionID, err = h.DS.CreateSession(r.Context(), a, 3)
