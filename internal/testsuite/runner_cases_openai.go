@@ -55,7 +55,8 @@ func (r *Runner) caseModelsOpenAI(ctx context.Context, cc *caseContext) error {
 	cc.assert("has_deepseek_reasoner", contains(ids, "deepseek-v4-pro"), strings.Join(ids, ","))
 	cc.assert("has_deepseek_expert_chat", contains(ids, "deepseek-v4-pro"), strings.Join(ids, ","))
 	cc.assert("has_deepseek_expert_reasoner", contains(ids, "deepseek-v4-pro"), strings.Join(ids, ","))
-	cc.assert("has_deepseek_vision_search", contains(ids, "deepseek-v4-vision-search"), strings.Join(ids, ","))
+	// v1.0.10: vision intentionally hidden — must NOT be advertised.
+	cc.assert("vision_hidden", !contains(ids, "deepseek-v4-vision"), strings.Join(ids, ","))
 	return nil
 }
 

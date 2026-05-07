@@ -40,12 +40,14 @@ func TestGetModelRouteDirectAndAlias(t *testing.T) {
 		}
 	})
 
-	t.Run("direct_vision", func(t *testing.T) {
+	// v1.0.10: deepseek-v4-vision is hidden + blocked. /v1/models/{id}
+	// must 404 rather than echo back the banned model.
+	t.Run("direct_vision_404", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/v1/models/deepseek-v4-vision", nil)
 		rec := httptest.NewRecorder()
 		r.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("expected 404 for disabled vision, got %d body=%s", rec.Code, rec.Body.String())
 		}
 	})
 

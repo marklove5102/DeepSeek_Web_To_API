@@ -34,7 +34,16 @@ func (h *Handler) testAPI(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"success": false, "error": "获取 PoW 失败: " + err.Error()})
 		return
 	}
-	resolvedModel, thinking, search := h.resolveAccountTestModel(model)
+	resolvedModel, thinking, search, ok := h.resolveAccountTestModel(model)
+	if !ok {
+		// v1.0.10: strict allowlist — admin /api-test must reject unknown
+		// or disabled (deepseek-v4-vision) model IDs same as a real client.
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"success": false,
+			"error":   "模型未启用或未支持: " + model,
+		})
+		return
+	}
 	payload := promptcompat.StandardRequest{
 		ResolvedModel: resolvedModel,
 		FinalPrompt:   prompt.MessagesPrepare([]map[string]any{{"role": "user", "content": message}}),

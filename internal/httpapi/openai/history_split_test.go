@@ -323,7 +323,7 @@ func TestApplyCurrentInputFileDisabledPassThrough(t *testing.T) {
 		DS: ds,
 	}
 	req := map[string]any{
-		"model":    "deepseek-v4-vision",
+		"model":    "deepseek-v4-pro",
 		"messages": historySplitTestMessages(),
 	}
 	stdReq, err := promptcompat.NormalizeOpenAIChatRequest(h.Store, req, "")
@@ -427,7 +427,7 @@ func TestApplyCurrentInputFilePreservesFullContextPromptForTokenCounting(t *test
 		DS: ds,
 	}
 	req := map[string]any{
-		"model":    "deepseek-v4-vision",
+		"model":    "deepseek-v4-pro",
 		"messages": historySplitTestMessages(),
 	}
 	stdReq, err := promptcompat.NormalizeOpenAIChatRequest(h.Store, req, "")
@@ -473,7 +473,7 @@ func TestApplyCurrentInputFileUploadsFullContextFile(t *testing.T) {
 		DS: ds,
 	}
 	req := map[string]any{
-		"model":    "deepseek-v4-vision",
+		"model":    "deepseek-v4-pro",
 		"messages": historySplitTestMessages(),
 	}
 	stdReq, err := promptcompat.NormalizeOpenAIChatRequest(h.Store, req, "")
@@ -495,8 +495,10 @@ func TestApplyCurrentInputFileUploadsFullContextFile(t *testing.T) {
 	if upload.Filename != "DEEPSEEK_WEB_TO_API_HISTORY.txt" {
 		t.Fatalf("expected DEEPSEEK_WEB_TO_API_HISTORY.txt upload, got %q", upload.Filename)
 	}
-	if upload.ModelType != "vision" {
-		t.Fatalf("expected vision model type for vision request, got %q", upload.ModelType)
+	// v1.0.10: vision is disabled — request now resolves to deepseek-v4-pro
+	// which stamps "expert" model_type onto the upload metadata.
+	if upload.ModelType != "expert" {
+		t.Fatalf("expected expert model type, got %q", upload.ModelType)
 	}
 	uploadedText := string(upload.Data)
 	for _, want := range []string{"# DEEPSEEK_WEB_TO_API_HISTORY.txt", "=== 1. SYSTEM ===", "=== 2. USER ===", "=== 3. ASSISTANT ===", "=== 4. TOOL ===", "=== 5. USER ===", "system instructions", "first user turn", "hidden reasoning", "tool result", "latest user turn", promptcompat.ThinkingInjectionMarker} {

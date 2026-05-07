@@ -13,7 +13,8 @@ func TestStandardRequestCompletionPayloadSetsModelTypeFromResolvedModel(t *testi
 		{name: "default", model: "deepseek-v4-flash", thinking: false, search: false, modelType: "default"},
 		{name: "default_nothinking", model: "deepseek-v4-flash-nothinking", thinking: false, search: false, modelType: "default"},
 		{name: "expert", model: "deepseek-v4-pro", thinking: true, search: false, modelType: "expert"},
-		{name: "vision", model: "deepseek-v4-vision", thinking: true, search: false, modelType: "vision"},
+		{name: "expert_search", model: "deepseek-v4-pro-search", thinking: true, search: true, modelType: "expert"},
+		// vision intentionally omitted: model is disabled in v1.0.10.
 	}
 
 	for _, tc := range tests {

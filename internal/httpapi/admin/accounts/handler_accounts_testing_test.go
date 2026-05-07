@@ -199,7 +199,9 @@ func TestTestAccount_MessageModeUsesExpertModelTypeForExpertModel(t *testing.T) 
 	}
 }
 
-func TestTestAccount_MessageModeUsesVisionModelTypeForVisionModel(t *testing.T) {
+// v1.0.10: deepseek-v4-vision was disabled. The admin "test account" path
+// must reject the request rather than proxy to a banned model.
+func TestTestAccount_RejectsDisabledVisionModel(t *testing.T) {
 	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{"accounts":[{"email":"batch@example.com","password":"pwd","token":"seed-token"}]}`)
 	store := config.LoadStore()
 	ds := &completionPayloadDSMock{}
@@ -211,11 +213,8 @@ func TestTestAccount_MessageModeUsesVisionModelTypeForVisionModel(t *testing.T) 
 
 	result := h.testAccount(context.Background(), acc, "deepseek-v4-vision", "hello")
 
-	if ok, _ := result["success"].(bool); !ok {
-		t.Fatalf("expected success=true, got %#v", result)
-	}
-	if got := ds.payload["model_type"]; got != "vision" {
-		t.Fatalf("expected model_type vision, got %#v", got)
+	if ok, _ := result["success"].(bool); ok {
+		t.Fatalf("expected success=false for disabled vision model, got %#v", result)
 	}
 }
 

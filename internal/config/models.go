@@ -16,12 +16,24 @@ type ModelAliasReader interface {
 
 const noThinkingModelSuffix = "-nothinking"
 
+// deepSeekBaseModels enumerates the models the gateway accepts for inference.
+// deepseek-v4-vision is intentionally absent: the upstream vision pipeline is
+// disabled (see blockedDeepSeekModels), so we MUST NOT advertise it on the
+// public /v1/models or /v1/models/{id} endpoints.
 var deepSeekBaseModels = []ModelInfo{
 	{ID: "deepseek-v4-flash", Object: "model", Created: 1677610602, OwnedBy: "deepseek", Permission: []any{}},
 	{ID: "deepseek-v4-pro", Object: "model", Created: 1677610602, OwnedBy: "deepseek", Permission: []any{}},
 	{ID: "deepseek-v4-flash-search", Object: "model", Created: 1677610602, OwnedBy: "deepseek", Permission: []any{}},
 	{ID: "deepseek-v4-pro-search", Object: "model", Created: 1677610602, OwnedBy: "deepseek", Permission: []any{}},
-	{ID: "deepseek-v4-vision", Object: "model", Created: 1677610602, OwnedBy: "deepseek", Permission: []any{}},
+}
+
+// blockedDeepSeekModels are upstream models that exist but the operator has
+// explicitly disabled. ResolveModel rejects any direct mention or alias
+// mapping into this set, irrespective of the family (deepseek-v4-vision can
+// be requested verbatim, via a user-defined alias map, or via legacy
+// gemini-pro-vision -> v4-vision style mappings — every path is closed).
+var blockedDeepSeekModels = map[string]struct{}{
+	"deepseek-v4-vision": {},
 }
 
 var DeepSeekModels = appendNoThinkingVariants(deepSeekBaseModels)
@@ -63,8 +75,11 @@ func GetModelConfig(model string) (thinking bool, search bool, ok bool) {
 	if baseModel == "" {
 		return false, false, false
 	}
+	if _, blocked := blockedDeepSeekModels[baseModel]; blocked {
+		return false, false, false
+	}
 	switch baseModel {
-	case "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-vision":
+	case "deepseek-v4-flash", "deepseek-v4-pro":
 		return !noThinking, false, true
 	case "deepseek-v4-flash-search", "deepseek-v4-pro-search":
 		return !noThinking, true, true
@@ -75,13 +90,14 @@ func GetModelConfig(model string) (thinking bool, search bool, ok bool) {
 
 func GetModelType(model string) (modelType string, ok bool) {
 	baseModel, _ := splitNoThinkingModel(model)
+	if _, blocked := blockedDeepSeekModels[baseModel]; blocked {
+		return "", false
+	}
 	switch baseModel {
 	case "deepseek-v4-flash", "deepseek-v4-flash-search":
 		return "default", true
 	case "deepseek-v4-pro", "deepseek-v4-pro-search":
 		return "expert", true
-	case "deepseek-v4-vision":
-		return "vision", true
 	default:
 		return "", false
 	}
@@ -178,9 +194,11 @@ func DefaultModelAliases() map[string]string {
 		"claude-3-haiku-20240307":    "deepseek-v4-flash",
 
 		// Gemini current and historical text / multimodal models
-		"gemini-pro":            "deepseek-v4-pro",
-		"gemini-pro-vision":     "deepseek-v4-vision",
-		"gemini-pro-latest":     "deepseek-v4-pro",
+		// (gemini-pro-vision intentionally not mapped — vision is disabled.
+		// Requests against gemini-pro-vision will resolve to nothing and be
+		// rejected at the strict allowlist gate.)
+		"gemini-pro":        "deepseek-v4-pro",
+		"gemini-pro-latest": "deepseek-v4-pro",
 		"gemini-flash-latest":   "deepseek-v4-flash",
 		"gemini-1.5-pro":        "deepseek-v4-pro",
 		"gemini-1.5-flash":      "deepseek-v4-flash",
@@ -201,24 +219,62 @@ func DefaultModelAliases() map[string]string {
 	}
 }
 
+// ResolveModel maps a client-requested model id to a supported DeepSeek
+// model. It is strict: requests for anything outside the allowlist return
+// (nil, false) — there is no heuristic fallback that maps "gpt-99-future" or
+// "claude-future-pro" to a default.
+//
+// Allowlist rules (checked in order):
+//  1. Direct hit on a supported DeepSeek model id.
+//  2. Hit on the alias map (DefaultModelAliases overlaid with operator
+//     model_aliases) where the target is a supported DeepSeek model id.
+//  3. Strip the optional "-nothinking" suffix and retry rules 1+2; the
+//     resolved model carries the suffix forward.
+//
+// Anything else is rejected. Operators add new mappings via WebUI
+// model_aliases (hot-reloaded). Mappings whose target is an unsupported or
+// blocked model id are rejected as well — operators can't accidentally
+// re-enable a disabled upstream by aliasing into it.
 func ResolveModel(store ModelAliasReader, requested string) (string, bool) {
 	model := lower(strings.TrimSpace(requested))
 	if model == "" {
+		return "", false
+	}
+	if isBlockedModel(model) {
 		return "", false
 	}
 	aliases := loadModelAliases(store)
 	if IsSupportedDeepSeekModel(model) {
 		return model, true
 	}
-	if mapped, ok := aliases[model]; ok && IsSupportedDeepSeekModel(mapped) {
+	if mapped, ok := aliases[model]; ok && IsSupportedDeepSeekModel(mapped) && !isBlockedModel(mapped) {
 		return mapped, true
 	}
 	baseModel, noThinking := splitNoThinkingModel(model)
+	if isBlockedModel(baseModel) {
+		return "", false
+	}
 	resolvedModel, ok := resolveCanonicalModel(aliases, baseModel)
 	if !ok {
 		return "", false
 	}
 	return withNoThinkingVariant(resolvedModel, noThinking), true
+}
+
+// isBlockedModel returns true if model (or its no-thinking base form) is on
+// the blocked list. Used everywhere a string can sneak into the resolver.
+func isBlockedModel(model string) bool {
+	if model == "" {
+		return false
+	}
+	if _, blocked := blockedDeepSeekModels[model]; blocked {
+		return true
+	}
+	base, _ := splitNoThinkingModel(model)
+	if _, blocked := blockedDeepSeekModels[base]; blocked {
+		return true
+	}
+	return false
 }
 
 func isRetiredHistoricalModel(model string) bool {
@@ -316,6 +372,19 @@ func loadModelAliases(store ModelAliasReader) map[string]string {
 	return aliases
 }
 
+// resolveCanonicalModel handles the post-suffix-stripped model id under the
+// strict allowlist. It accepts:
+//   - Direct DeepSeek model id (e.g. "deepseek-v4-pro")
+//   - An alias whose target is a supported DeepSeek model id
+//
+// Heuristic family-prefix matching (gpt-/claude-/gemini-/o1/o3/llama-/qwen-/
+// etc) was removed in v1.0.10. It silently routed any unknown id starting
+// with a known family prefix to a default DeepSeek model, which made the
+// model contract effectively "everything works", masked client-side typos,
+// and prevented the operator from disabling specific upstream models
+// (deepseek-v4-vision was reachable as long as the request id contained
+// "vision"). Operators who want a custom client model id served must add
+// an explicit alias in the WebUI model_aliases section.
 func resolveCanonicalModel(aliases map[string]string, model string) (string, bool) {
 	model = lower(strings.TrimSpace(model))
 	if model == "" {
@@ -327,46 +396,8 @@ func resolveCanonicalModel(aliases map[string]string, model string) (string, boo
 	if IsSupportedDeepSeekModel(model) {
 		return model, true
 	}
-	if mapped, ok := aliases[model]; ok && IsSupportedDeepSeekModel(mapped) {
+	if mapped, ok := aliases[model]; ok && IsSupportedDeepSeekModel(mapped) && !isBlockedModel(mapped) {
 		return mapped, true
 	}
-	if strings.HasPrefix(model, "deepseek-") {
-		return "", false
-	}
-
-	knownFamily := false
-	for _, prefix := range []string{
-		"gpt-", "o1", "o3", "claude-", "gemini-", "llama-", "qwen-", "mistral-", "command-",
-	} {
-		if strings.HasPrefix(model, prefix) {
-			knownFamily = true
-			break
-		}
-	}
-	if !knownFamily {
-		return "", false
-	}
-
-	useVision := strings.Contains(model, "vision")
-	useReasoner := strings.Contains(model, "reason") ||
-		strings.Contains(model, "reasoner") ||
-		strings.HasPrefix(model, "o1") ||
-		strings.HasPrefix(model, "o3") ||
-		strings.Contains(model, "opus") ||
-		strings.Contains(model, "slow") ||
-		strings.Contains(model, "r1")
-	useSearch := strings.Contains(model, "search")
-
-	switch {
-	case useVision:
-		return "deepseek-v4-vision", true
-	case useReasoner && useSearch:
-		return "deepseek-v4-pro-search", true
-	case useReasoner:
-		return "deepseek-v4-pro", true
-	case useSearch:
-		return "deepseek-v4-flash-search", true
-	default:
-		return "deepseek-v4-flash", true
-	}
+	return "", false
 }

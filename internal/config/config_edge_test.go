@@ -79,24 +79,24 @@ func TestGetModelConfigDeepSeekExpertReasonerSearch(t *testing.T) {
 	}
 }
 
-func TestGetModelConfigDeepSeekVision(t *testing.T) {
-	thinking, search, ok := GetModelConfig("deepseek-v4-vision")
-	if !ok {
-		t.Fatal("expected ok for deepseek-v4-vision")
-	}
-	if !thinking || search {
-		t.Fatalf("expected thinking=true search=false, got thinking=%v search=%v", thinking, search)
+// v1.0.10: deepseek-v4-vision is on the blocked list. Both GetModelConfig
+// and GetModelType must report it as unsupported even though the upstream
+// model technically exists.
+func TestGetModelConfigDeepSeekVisionDisabled(t *testing.T) {
+	for _, model := range []string{
+		"deepseek-v4-vision",
+		"deepseek-v4-vision-nothinking",
+		"deepseek-v4-vision-search",
+	} {
+		t.Run(model, func(t *testing.T) {
+			if _, _, ok := GetModelConfig(model); ok {
+				t.Fatalf("expected %q to be unsupported (disabled)", model)
+			}
+		})
 	}
 }
 
-func TestGetModelConfigDeepSeekVisionSearchUnsupported(t *testing.T) {
-	_, _, ok := GetModelConfig("deepseek-v4-vision-search")
-	if ok {
-		t.Fatal("expected deepseek-v4-vision-search to be unsupported")
-	}
-}
-
-func TestGetModelTypeDefaultExpertAndVision(t *testing.T) {
+func TestGetModelTypeDefaultExpertVisionDisabled(t *testing.T) {
 	defaultType, ok := GetModelType("deepseek-v4-flash")
 	if !ok || defaultType != "default" {
 		t.Fatalf("expected default model_type, got ok=%v model_type=%q", ok, defaultType)
@@ -109,9 +109,8 @@ func TestGetModelTypeDefaultExpertAndVision(t *testing.T) {
 	if !ok || expertType != "expert" {
 		t.Fatalf("expected expert model_type, got ok=%v model_type=%q", ok, expertType)
 	}
-	visionType, ok := GetModelType("deepseek-v4-vision")
-	if !ok || visionType != "vision" {
-		t.Fatalf("expected vision model_type, got ok=%v model_type=%q", ok, visionType)
+	if _, ok := GetModelType("deepseek-v4-vision"); ok {
+		t.Fatalf("expected deepseek-v4-vision to be unsupported (disabled)")
 	}
 }
 
@@ -746,12 +745,14 @@ func TestOpenAIModelsResponse(t *testing.T) {
 		"deepseek-v4-flash-search-nothinking": false,
 		"deepseek-v4-pro-search":              false,
 		"deepseek-v4-pro-search-nothinking":   false,
-		"deepseek-v4-vision":                  false,
-		"deepseek-v4-vision-nothinking":       false,
 	}
 	for _, model := range data {
 		if _, ok := expected[model.ID]; ok {
 			expected[model.ID] = true
+		}
+		// v1.0.10: vision is hidden, must NOT appear in /v1/models output.
+		if model.ID == "deepseek-v4-vision" || model.ID == "deepseek-v4-vision-nothinking" {
+			t.Fatalf("/v1/models leaked disabled model %q", model.ID)
 		}
 	}
 	for id, seen := range expected {

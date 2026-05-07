@@ -117,7 +117,9 @@ func TestFilesRouteUploadSuccess(t *testing.T) {
 	r := chi.NewRouter()
 	registerOpenAITestRoutes(r, h)
 
-	req := newMultipartUploadRequest(t, "assistants", "notes.txt", []byte("hello world"), "deepseek-v4-vision")
+	// v1.0.10: vision is disabled. Use deepseek-v4-pro to get a non-default
+	// (expert) model_type stamped onto the upload metadata.
+	req := newMultipartUploadRequest(t, "assistants", "notes.txt", []byte("hello world"), "deepseek-v4-pro")
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
@@ -130,8 +132,8 @@ func TestFilesRouteUploadSuccess(t *testing.T) {
 	if ds.lastReq.Purpose != "assistants" {
 		t.Fatalf("expected purpose assistants, got %q", ds.lastReq.Purpose)
 	}
-	if ds.lastReq.ModelType != "vision" {
-		t.Fatalf("expected vision model type, got %q", ds.lastReq.ModelType)
+	if ds.lastReq.ModelType != "expert" {
+		t.Fatalf("expected expert model type, got %q", ds.lastReq.ModelType)
 	}
 	if string(ds.lastReq.Data) != "hello world" {
 		t.Fatalf("unexpected uploaded data: %q", string(ds.lastReq.Data))
@@ -157,7 +159,8 @@ func TestFilesRouteUploadIncludesAccountIDForManagedAccount(t *testing.T) {
 	r := chi.NewRouter()
 	registerOpenAITestRoutes(r, h)
 
-	req := newMultipartUploadRequest(t, "assistants", "notes.txt", []byte("hello world"), "deepseek-v4-vision")
+	// v1.0.10: vision is disabled — switch to deepseek-v4-pro.
+	req := newMultipartUploadRequest(t, "assistants", "notes.txt", []byte("hello world"), "deepseek-v4-pro")
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 

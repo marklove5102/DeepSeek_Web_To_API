@@ -100,7 +100,17 @@ func (h *Handler) updateSessionCount(ctx context.Context, identifier, token stri
 }
 
 func (h *Handler) runAccountCompletion(ctx context.Context, a *authn.RequestAuth, sessionID string, model, message string, start time.Time, result map[string]any) {
-	model, thinking, search := h.resolveAccountTestModel(model)
+	resolvedModel, thinking, search, ok := h.resolveAccountTestModel(model)
+	if !ok {
+		// v1.0.10: strict allowlist — admin "test account" must NOT bypass
+		// the model gate. Disabled (deepseek-v4-vision) or unknown model
+		// IDs short-circuit here so the operator gets the same rejection
+		// message a real client would.
+		result["message"] = "模型未启用或未支持: " + model
+		result["response_time"] = int(time.Since(start).Milliseconds())
+		return
+	}
+	model = resolvedModel
 	pow, err := h.DS.GetPow(ctx, a, 1)
 	if err != nil {
 		result["message"] = "获取 PoW 失败: " + err.Error()
@@ -135,18 +145,22 @@ func (h *Handler) runAccountCompletion(ctx context.Context, a *authn.RequestAuth
 	}
 }
 
-func (h *Handler) resolveAccountTestModel(model string) (string, bool, bool) {
-	thinking, search, ok := config.GetModelConfig(model)
-	if resolvedModel, resolved := config.ResolveModel(modelAliasSnapshotReader{
+// resolveAccountTestModel returns (resolvedModel, thinking, search, ok).
+// ok=false means the requested id is unknown OR explicitly blocked
+// (deepseek-v4-vision in v1.0.10) — callers must NOT proxy to the upstream
+// in that case.
+func (h *Handler) resolveAccountTestModel(model string) (string, bool, bool, bool) {
+	resolvedModel, resolved := config.ResolveModel(modelAliasSnapshotReader{
 		aliases: h.Store.Snapshot().ModelAliases,
-	}, model); resolved {
-		model = resolvedModel
-		thinking, search, ok = config.GetModelConfig(model)
+	}, model)
+	if !resolved {
+		return model, false, false, false
 	}
+	thinking, search, ok := config.GetModelConfig(resolvedModel)
 	if !ok {
-		return model, false, false
+		return resolvedModel, false, false, false
 	}
-	return model, thinking, search
+	return resolvedModel, thinking, search, true
 }
 
 func withConfigWarning(message string, result map[string]any) string {

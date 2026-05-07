@@ -63,7 +63,7 @@ func TestResolveExpandedHistoricalAliases(t *testing.T) {
 		{name: "claude historical haiku", model: "claude-3-haiku-20240307", want: "deepseek-v4-flash"},
 		{name: "gemini latest alias", model: "gemini-flash-latest", want: "deepseek-v4-flash"},
 		{name: "gemini historical pro", model: "gemini-1.5-pro", want: "deepseek-v4-pro"},
-		{name: "gemini vision legacy", model: "gemini-pro-vision", want: "deepseek-v4-vision"},
+		// gemini-pro-vision intentionally absent: vision is disabled (v1.0.10).
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -75,17 +75,28 @@ func TestResolveExpandedHistoricalAliases(t *testing.T) {
 	}
 }
 
-func TestResolveModelHeuristicReasoner(t *testing.T) {
-	got, ok := ResolveModel(nil, "o3-super")
-	if !ok || got != "deepseek-v4-pro" {
-		t.Fatalf("expected heuristic reasoner, got ok=%v model=%q", ok, got)
+// v1.0.10: heuristic family-prefix fallback was removed. Any unknown id
+// (even if it starts with gpt-/claude-/gemini-/o1/o3 etc) must now be
+// rejected unless the operator added an explicit alias.
+func TestResolveModelStrictAllowlistRejectsHeuristicMatches(t *testing.T) {
+	cases := []string{
+		"o3-super",                  // ex-heuristic reasoner
+		"o3-super-nothinking",       // ex-heuristic reasoner with suffix
+		"gpt-99-mega",               // unknown OpenAI family
+		"claude-future-pro",         // unknown Anthropic family
+		"gemini-9.9-ultra",          // unknown Google family
+		"llama-9000-instruct",       // unknown Llama family
+		"qwen-galaxy",               // unknown Qwen family
+		"mistral-extreme",           // unknown Mistral family
+		"command-omega",             // unknown Cohere family
+		"some-random-vendor-model",  // wholly unknown family
 	}
-}
-
-func TestResolveModelHeuristicReasonerNoThinking(t *testing.T) {
-	got, ok := ResolveModel(nil, "o3-super-nothinking")
-	if !ok || got != "deepseek-v4-pro-nothinking" {
-		t.Fatalf("expected heuristic reasoner nothinking, got ok=%v model=%q", ok, got)
+	for _, model := range cases {
+		t.Run(model, func(t *testing.T) {
+			if got, ok := ResolveModel(nil, model); ok {
+				t.Fatalf("expected strict-allowlist rejection of %q, got %q", model, got)
+			}
+		})
 	}
 }
 
@@ -142,19 +153,41 @@ func TestResolveModelCustomAliasToExpert(t *testing.T) {
 	}
 }
 
-func TestResolveModelCustomAliasToVision(t *testing.T) {
-	got, ok := ResolveModel(mockModelAliasReader{
-		"my-vision-model": "deepseek-v4-vision",
-	}, "my-vision-model")
-	if !ok || got != "deepseek-v4-vision" {
-		t.Fatalf("expected alias -> deepseek-v4-vision, got ok=%v model=%q", ok, got)
+// v1.0.10: deepseek-v4-vision is disabled. Direct mention, alias mappings,
+// and former heuristic-vision matches must all return rejection.
+func TestResolveModelDirectVisionRejected(t *testing.T) {
+	for _, model := range []string{
+		"deepseek-v4-vision",
+		"deepseek-v4-vision-nothinking",
+		"DeepSeek-V4-Vision", // case-insensitive
+	} {
+		t.Run(model, func(t *testing.T) {
+			if got, ok := ResolveModel(nil, model); ok {
+				t.Fatalf("expected direct vision request to be rejected, got %q", got)
+			}
+		})
 	}
 }
 
-func TestResolveModelHeuristicVisionIgnoresSearchSuffix(t *testing.T) {
-	got, ok := ResolveModel(nil, "gemini-vision-search")
-	if !ok || got != "deepseek-v4-vision" {
-		t.Fatalf("expected heuristic vision alias to resolve without search variant, got ok=%v model=%q", ok, got)
+func TestResolveModelAliasIntoVisionRejected(t *testing.T) {
+	// Even an operator-defined alias mapping into the blocked model must be
+	// rejected — operators can't accidentally re-enable a disabled upstream.
+	if got, ok := ResolveModel(mockModelAliasReader{
+		"my-vision-model": "deepseek-v4-vision",
+	}, "my-vision-model"); ok {
+		t.Fatalf("expected alias -> deepseek-v4-vision to be rejected, got %q", got)
+	}
+}
+
+func TestResolveModelGeminiVisionLegacyRejected(t *testing.T) {
+	// gemini-pro-vision used to map to deepseek-v4-vision; mapping removed
+	// in v1.0.10 so this id now hits no alias and the strict allowlist
+	// rejects it.
+	if got, ok := ResolveModel(nil, "gemini-pro-vision"); ok {
+		t.Fatalf("expected gemini-pro-vision to be rejected after vision-disable, got %q", got)
+	}
+	if got, ok := ResolveModel(nil, "gemini-vision-search"); ok {
+		t.Fatalf("expected gemini-vision-search to be rejected after heuristic removal, got %q", got)
 	}
 }
 
