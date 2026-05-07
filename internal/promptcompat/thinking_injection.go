@@ -36,7 +36,18 @@ const (
 	// Promoted to the system message (next to the DSML format RULES) so it
 	// survives fast-path turns and is not duplicated against system-level
 	// tool format rules.
-	ToolChainPlaybookPrompt = "Tool-Chain Discipline (read before every tool decision):\n" +
+	//
+	// The leading BINDING COMPLIANCE clause is the v1.0.13 strengthening:
+	// when the user's request even mentions a tool call (function name,
+	// MCP server, dotted-namespace tool, "use the X tool", "call X",
+	// "调用 X", "用 X 工具", etc.) the rules below are non-negotiable.
+	// Skipping READ-BEFORE-EDIT, narrating-instead-of-emitting, retrying
+	// with identical args after failure, or fabricating a server/tool not
+	// in the schema is a protocol violation — the model must self-correct
+	// before producing the next tool_calls block.
+	ToolChainPlaybookPrompt = "🔒 BINDING TOOL-USE COMPLIANCE: When ANY user message mentions a tool — by tool name, MCP server (`<server>.<tool>`), function/parameter from the schema, or by plain phrasing such as \"use the X tool\", \"call X\", \"invoke X\", \"调用 X\", \"用 X 工具\" — the playbook below is MANDATORY. Deviation (skipping READ-BEFORE-EDIT, narrating the plan instead of emitting the call, retrying with identical args after failure, fabricating a server/tool not in the schema, or omitting required schema parameters) is a protocol violation. Self-correct before emitting the next tool_calls block.\n" +
+		"\n" +
+		"Tool-Chain Discipline (read before every tool decision):\n" +
 		"1. CALL a tool only when you need information you do not have or an action on an external resource. Never guess a value you could read.\n" +
 		"2. PARALLEL vs SEQUENTIAL — when multiple calls are independent, emit them inside the SAME <|DSML|tool_calls> block so they run concurrently. Only chain calls when one depends on another's output.\n" +
 		"3. AFTER A RESULT — read it carefully, then either chain a follow-up call OR produce the final answer. Diagnose tool errors at the root cause; do NOT blindly retry the same call with the same arguments. Two failures of the same call halts the chain.\n" +

@@ -112,6 +112,7 @@ func (h *Handler) safetyResponse(legacy config.SafetyConfig) map[string]any {
 		"blocked_conversation_ids": blockedConv,
 		"banned_content":           bannedContent,
 		"banned_regex":             bannedRegex,
+		"disabled_builtin_rules":   append([]string(nil), legacy.DisabledBuiltinRules...),
 		"jailbreak": map[string]any{
 			"enabled":  jailbreakEnabled,
 			"patterns": jailPatterns,

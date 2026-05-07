@@ -413,6 +413,13 @@ func mergeSafetySources(cfg config.SafetyConfig, c *policyCache) config.SafetyCo
 			cfg.BlockedConversationIDs = appendUnique(cfg.BlockedConversationIDs, blockedConv)
 		}
 	}
+	// Merge in the binary's built-in safety catalogue last so the policy
+	// the guard sees is (builtin minus disabled-by-operator) ∪ (operator's
+	// own banned_content / banned_regex / jailbreak.patterns) ∪ (the
+	// dedicated SQLite stores). buildPolicy dedupes inside.
+	cfg.BannedContent = cfg.EffectiveBannedContent()
+	cfg.BannedRegex = cfg.EffectiveBannedRegex()
+	cfg.Jailbreak.Patterns = cfg.EffectiveJailbreakPatterns()
 	return cfg
 }
 

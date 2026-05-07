@@ -271,6 +271,7 @@ func parseSettingsUpdateRequest(req map[string]any) (*config.AdminConfig, *confi
 		cfg.BlockedConversationIDs = stringSliceFrom(raw["blocked_conversation_ids"])
 		cfg.BannedContent = stringSliceFrom(raw["banned_content"])
 		cfg.BannedRegex = stringSliceFrom(raw["banned_regex"])
+		cfg.DisabledBuiltinRules = stringSliceFrom(raw["disabled_builtin_rules"])
 		if jailRaw, ok := raw["jailbreak"].(map[string]any); ok {
 			if v, exists := jailRaw["enabled"]; exists {
 				b := boolFrom(v)

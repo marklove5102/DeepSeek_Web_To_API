@@ -127,6 +127,9 @@ func (h *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if safetyCfg != nil {
+			// Preserve disabled_builtin_rules even if the request omits the
+			// safety object's other slices entirely — operator can flip a
+			// builtin rule on/off in isolation without losing custom lists.
 			c.Safety = *safetyCfg
 			// Mirror the list fields into the dedicated SQLite stores so
 			// runtime state stays consistent across both sources. Failures

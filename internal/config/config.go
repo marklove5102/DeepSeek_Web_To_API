@@ -205,6 +205,11 @@ type SafetyConfig struct {
 	BannedRegex            []string            `json:"banned_regex,omitempty"`
 	Jailbreak              JailbreakConfig     `json:"jailbreak,omitempty"`
 	AutoBan                SafetyAutoBanConfig `json:"auto_ban,omitempty"`
+	// DisabledBuiltinRules lets the operator silence specific built-in
+	// rules (see internal/config/builtin_safety.go) by their stable ID.
+	// Rules with AllowDisable=false (CSAM / furry / bestiality / persona-
+	// escape jailbreaks) are always-on regardless of this list.
+	DisabledBuiltinRules []string `json:"disabled_builtin_rules,omitempty"`
 }
 
 type JailbreakConfig struct {
