@@ -73,6 +73,27 @@ func (c *Client) CallCompletion(ctx context.Context, a *auth.RequestAuth, payloa
 				config.Logger.Warn("[completion] close upstream response body failed", "account", accountIDForLog(a), "status", resp.StatusCode, "error", err)
 			}
 		}
+		// 429 from upstream means the account is rate-limited right now.
+		// Other accounts in the pool may have headroom — fail over to a
+		// fresh one WITHOUT consuming the maxAttempts budget. Only when
+		// the pool is exhausted (every managed account has been tried)
+		// or the caller is on a direct token (no pool to switch to) do we
+		// fall through to the normal "count this as a real attempt and
+		// possibly back off" path. Without this special case the chat
+		// handler's hard-coded maxAttempts=3 would surface 429 to the
+		// client even when the operator's pool has dozens of idle
+		// accounts — the historical pain on /admin/metrics/overview's
+		// failure rate.
+		if resp.StatusCode == http.StatusTooManyRequests && a.UseConfigToken && c.hasCompletionSwitchCandidate(a) {
+			if switchErr := c.switchCompletionAccount(ctx, a, &clients, &headers, payload); switchErr == nil {
+				config.Logger.Info("[completion] 429 fail-over to next account", "from", accountIDForLog(a), "tried", len(a.TriedAccounts))
+				continue
+			} else if !errors.Is(switchErr, errNoCompletionSwitchCandidate) {
+				config.Logger.Warn("[completion] 429 switch account failed", "account", accountIDForLog(a), "error", switchErr)
+				return nil, firstError(switchErr, lastErr)
+			}
+			// fall through to normal attempts-counted path below.
+		}
 		attempts++
 		if attempts >= maxAttempts {
 			break

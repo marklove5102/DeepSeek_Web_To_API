@@ -159,6 +159,156 @@ func TestCallCompletionReturnsUpstreamStatusFailure(t *testing.T) {
 	}
 }
 
+// rateLimitFailoverDoer returns 429 for the first `failuresBeforeSuccess`
+// requests, then 200 OK with a minimal SSE stream. It records every call so
+// the test can inspect which token was used at each attempt.
+type rateLimitFailoverDoer struct {
+	failuresBeforeSuccess int
+	calls                 int
+	seenTokens            []string
+}
+
+func (d *rateLimitFailoverDoer) Do(req *http.Request) (*http.Response, error) {
+	d.calls++
+	d.seenTokens = append(d.seenTokens, strings.TrimSpace(req.Header.Get("authorization")))
+	if d.calls <= d.failuresBeforeSuccess {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"error":"rate limited"}`)),
+			Request:    req,
+		}, nil
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader("data: {\"v\":\"ok\"}\n" + "data: [DONE]\n")),
+		Request:    req,
+	}, nil
+}
+
+// TestCallCompletion429FailsOverAcrossWholePoolBeyondMaxAttempts proves the
+// v1.0.12 contract: 429 from upstream triggers an account switch but does
+// NOT consume the maxAttempts budget. Three accounts, the first two return
+// 429, the third returns 200. With maxAttempts=2 (the historical default
+// before this fix surfaced) the legacy behavior would have exhausted the
+// budget after the second 429 and propagated 429 to the client; the new
+// behavior keeps switching until the third account answers 200.
+func TestCallCompletion429FailsOverAcrossWholePoolBeyondMaxAttempts(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{
+		"keys":["managed-key"],
+		"accounts":[
+			{"email":"acc1@example.com","password":"pwd","token":"token-1"},
+			{"email":"acc2@example.com","password":"pwd","token":"token-2"},
+			{"email":"acc3@example.com","password":"pwd","token":"token-3"}
+		],
+		"runtime":{"account_max_inflight":1}
+	}`)
+	store := config.LoadStore()
+	pool := account.NewPool(store)
+	resolver := auth.NewResolver(store, pool, func(_ context.Context, acc config.Account) (string, error) {
+		switch acc.Email {
+		case "acc1@example.com":
+			return "token-1", nil
+		case "acc2@example.com":
+			return "token-2", nil
+		case "acc3@example.com":
+			return "token-3", nil
+		}
+		return "token-x", nil
+	})
+	doer := &rateLimitFailoverDoer{failuresBeforeSuccess: 2}
+	client := &Client{
+		Auth:       resolver,
+		Store:      store,
+		regular:    completionSwitchRegularDoer{},
+		stream:     doer,
+		fallbackS:  &http.Client{},
+		fallback:   &http.Client{},
+		maxRetries: 3,
+	}
+	first, ok := store.FindAccount("acc1@example.com")
+	if !ok {
+		t.Fatal("missing first account")
+	}
+	a := &auth.RequestAuth{
+		UseConfigToken: true,
+		DeepSeekToken:  "token-1",
+		AccountID:      "acc1@example.com",
+		Account:        first,
+		TriedAccounts:  map[string]bool{},
+	}
+	resp, err := client.CallCompletion(context.Background(), a, map[string]any{"chat_session_id": "s"}, "pow", 2)
+	if err != nil {
+		t.Fatalf("CallCompletion returned error: %v (seenTokens=%v)", err, doer.seenTokens)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if doer.calls != 3 {
+		t.Fatalf("expected 3 upstream attempts (2 x 429 + 1 x 200), got %d", doer.calls)
+	}
+	if a.AccountID != "acc3@example.com" {
+		t.Fatalf("expected to land on acc3 after fail-over, got %q (tried=%v)", a.AccountID, a.TriedAccounts)
+	}
+}
+
+// TestCallCompletion429PropagatesWhenPoolExhausted confirms the fail-over is
+// not infinite: when every account has been tried and they all 429, the
+// client receives the upstream 429 — we don't loop forever or mask a real
+// fleet-wide rate-limit.
+func TestCallCompletion429PropagatesWhenPoolExhausted(t *testing.T) {
+	t.Setenv("DEEPSEEK_WEB_TO_API_CONFIG_JSON", `{
+		"keys":["managed-key"],
+		"accounts":[
+			{"email":"acc1@example.com","password":"pwd","token":"token-1"},
+			{"email":"acc2@example.com","password":"pwd","token":"token-2"}
+		],
+		"runtime":{"account_max_inflight":1}
+	}`)
+	store := config.LoadStore()
+	pool := account.NewPool(store)
+	resolver := auth.NewResolver(store, pool, func(_ context.Context, acc config.Account) (string, error) {
+		if acc.Email == "acc2@example.com" {
+			return "token-2", nil
+		}
+		return "token-1", nil
+	})
+	doer := &rateLimitFailoverDoer{failuresBeforeSuccess: 1000} // never succeed
+	client := &Client{
+		Auth:       resolver,
+		Store:      store,
+		regular:    completionSwitchRegularDoer{},
+		stream:     doer,
+		fallbackS:  &http.Client{},
+		fallback:   &http.Client{},
+		maxRetries: 3,
+	}
+	first, ok := store.FindAccount("acc1@example.com")
+	if !ok {
+		t.Fatal("missing first account")
+	}
+	a := &auth.RequestAuth{
+		UseConfigToken: true,
+		DeepSeekToken:  "token-1",
+		AccountID:      "acc1@example.com",
+		Account:        first,
+		TriedAccounts:  map[string]bool{},
+	}
+	resp, err := client.CallCompletion(context.Background(), a, map[string]any{"chat_session_id": "s"}, "pow", 2)
+	if resp != nil {
+		t.Fatalf("expected nil response after fleet-wide 429, got %#v", resp)
+	}
+	var failure *RequestFailure
+	if !errors.As(err, &failure) {
+		t.Fatalf("expected RequestFailure, got %T %v", err, err)
+	}
+	if failure.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("expected propagated 429, got %d (msg=%q)", failure.StatusCode, failure.Message)
+	}
+	if doer.calls < 2 {
+		t.Fatalf("expected at least one fail-over before propagation, got %d calls", doer.calls)
+	}
+}
+
 func TestStreamPostDoesNotFallbackAfterContextCancel(t *testing.T) {
 	t.Parallel()
 

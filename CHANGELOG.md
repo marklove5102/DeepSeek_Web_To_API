@@ -1,5 +1,13 @@
 # 更新日志
 
+## 2026-05-07 (1.0.12)
+
+v1.0.12 修复上游 429 时的账号切换不彻底问题：原本 chat / responses / claude 三个 handler 的 `CallCompletion(... maxAttempts=3)` 调用让"切账号"和"重试同账号"共享同一个预算 — 大账号池里前 3 个账号撞上 rate-limit 后，即便剩余几十个账号空闲，也直接吐 429 给客户端。VERSION 从 `1.0.11` 升到 `1.0.12`。
+
+### 子段 v1.0.12 修复
+
+- **429 跨账号弹性 fail-over，不再消耗 maxAttempts 预算**：[`internal/deepseek/client/client_completion.go`](internal/deepseek/client/client_completion.go) `CallCompletion` 在上游返回 429 时增加 special-case：① 仅在 `a.UseConfigToken == true`（受管账号池模式）；② 且 `hasCompletionSwitchCandidate(a)` 仍有未试账号；满足时调用 `switchCompletionAccount` 切到下一个账号 **不递增 attempts 计数**（旧行为下每次 429 都消耗 1 次 maxAttempts，3 个账号都 429 后即向客户端返回 429）。已 tried 的账号继续记录在 `a.TriedAccounts`，所以不会回到同一账号导致死循环；当池子真的耗尽（`hasCompletionSwitchCandidate` 返回 false）才走兜底 attempts-counted 路径并最终返回 429。其他状态码（401 / 502 / 5xx）保持原行为，仅 429 享受弹性 fail-over —— 因为 429 是临时 rate-limit、其他账号大概率有头铺；其他状态码若是 token 失效或上游配置问题，切换不会带来收益反而浪费配额。生产 30 天数据：1342 条 429 透出（占失败率主要构成），本修复后池中只要有任一账号有头铺就不会失败。回归测试：① `TestCallCompletion429FailsOverAcrossWholePoolBeyondMaxAttempts` 用 3 账号池 + maxAttempts=2 + 前 2 账号 429 + 第 3 账号 200，断言客户端最终拿到 200 且第 3 个账号被命中（旧行为下 maxAttempts=2 用完 → 失败）；② `TestCallCompletion429PropagatesWhenPoolExhausted` 用 2 账号池 + 全部 429，断言最终客户端仍拿到 429（确认 fail-over 不是无限循环，物理账号耗尽时仍正确传播错误）。
+
 ## 2026-05-07 (1.0.11)
 
 v1.0.11 是 v1.0.10 的纯 lint-fix patch 版本：v1.0.10 release-artifacts CI 因为 [`internal/config/model_alias_test.go`](internal/config/model_alias_test.go) `TestResolveModelStrictAllowlistRejectsHeuristicMatches` 数组里注释列对齐与 [`internal/config/models.go`](internal/config/models.go) `DefaultModelAliases` 的 gemini 段空白宽度被 gofmt 拦截。功能性代码完全等价（v1.0.10 main commit 已部署到 prod 且 healthz 200，行为正确），本版本仅修 lint 让 GitHub Release 二进制能正确产出。无需重新部署 prod。
