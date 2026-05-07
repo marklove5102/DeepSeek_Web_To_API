@@ -98,8 +98,13 @@ func NewApp() (*App, error) {
 	// pool to run a fast deepseek-v4-flash-nothinking audit before the
 	// real upstream call. Disabled checker is a no-op (still injected so
 	// handlers can call CheckWithAuth unconditionally).
-	safetyLLMConfig := buildSafetyLLMConfig(store.Snapshot().Safety.LLMCheck)
-	safetyLLMChecker := safetyllm.NewLLMChecker(safetyLLMConfig, safetyllm.NewDeepSeekDoer(dsClient))
+	// v1.0.15: bind the checker to a live config source so the operator can
+	// flip safety.llm_check.enabled (and other runtime knobs) via the WebUI
+	// PUT /admin/settings — the very next request picks up the new state
+	// without a process restart. Cache size + concurrency depth still come
+	// from the bootstrap snapshot (those back finite-size objects).
+	safetyLLMSource := safetyLLMConfigSource{store: store}
+	safetyLLMChecker := safetyllm.NewLLMCheckerWithSource(safetyLLMSource, safetyllm.NewDeepSeekDoer(dsClient))
 	chatHandler := &chat.Handler{Store: store, Auth: resolver, DS: dsClient, ChatHistory: chatHistoryStore, SafetyLLM: safetyLLMChecker}
 	responsesHandler := &responses.Handler{Store: store, Auth: resolver, DS: dsClient, ChatHistory: chatHistoryStore, SafetyLLM: safetyLLMChecker}
 	filesHandler := &files.Handler{Store: store, Auth: resolver, DS: dsClient, ChatHistory: chatHistoryStore}
@@ -560,6 +565,22 @@ func WriteUnhandledError(w http.ResponseWriter, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusInternalServerError)
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"type": "api_error", "message": "Internal Server Error", "detail": err.Error()}})
+}
+
+// safetyLLMConfigSource adapts *config.Store to safetyllm.ConfigSource
+// so the checker reads the latest snapshot per-request. PUT
+// /admin/settings → Store.Update mutates the snapshot in-place under
+// the store's RWMutex, so subsequent SafetyLLMCheckConfig() calls see
+// the new value without polling or callbacks.
+type safetyLLMConfigSource struct {
+	store *config.Store
+}
+
+func (s safetyLLMConfigSource) SafetyLLMCheckConfig() safetyllm.Config {
+	if s.store == nil {
+		return safetyllm.DefaultConfig()
+	}
+	return buildSafetyLLMConfig(s.store.Snapshot().Safety.LLMCheck)
 }
 
 // buildSafetyLLMConfig translates the operator-facing

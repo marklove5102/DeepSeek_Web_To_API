@@ -1,5 +1,15 @@
 # 更新日志
 
+## 2026-05-08 (1.0.15)
+
+v1.0.15 修复 v1.0.14 的"WebUI 切 LLM 审核 enabled 不生效"问题：v1.0.14 的 `LLMChecker` 在 router 启动时持配置快照，运营方在 WebUI 切 `safety.llm_check.enabled=true` 后必须**重启进程**才生效——这是 release notes 已经标注但用户实际遇到的体验障碍。
+
+### 子段 v1.0.15 修复
+
+- **LLMChecker 改为运行时读 ConfigSource，热更新即生效**：[`internal/safetyllm/checker.go`](internal/safetyllm/checker.go) 新增 `ConfigSource` interface（仅 `SafetyLLMCheckConfig() Config` 方法）+ `NewLLMCheckerWithSource(source, doer)` 生产构造函数。`Enabled()` / `CheckWithAuth()` / `Stats()` 三处都改为每次调用先取 `c.currentConfig()` 拿 store 最新快照，因此 `Enabled` / `Model` / `TimeoutMs` / `FailOpen` / `MinInputChars` / `MaxInputChars` / `CacheTTLSeconds` 全部支持热切换——operator 在 WebUI 保存的下一刻，下一个请求就走新规则，无需重启。`CacheMaxEntries` + `MaxConcurrent` 仍是 bootstrap 时固定（背后是 LRU 容量 + semaphore depth 两个 finite-size 对象），需要重启才能调整。原 `NewLLMChecker(cfg, doer)` 签名保留，内部包装为 `staticConfigSource{cfg}`，所有现有测试 / 调用点不破坏。
+- **router 接入 live store**：[`internal/server/router.go`](internal/server/router.go) 新增 `safetyLLMConfigSource{store}` 适配器，`SafetyLLMCheckConfig()` 调用 `store.Snapshot().Safety.LLMCheck`。`store.Update`（PUT /admin/settings 的写路径）持有 RWMutex，下次 `Snapshot()` 立即返回新值，所以 chat / responses / claude handler 入口 `RunSafetyCheckAndBlock` 调 `checker.Enabled()` 时拿到的就是最新 enabled 状态。
+- **WebUI 操作流变化**：勾选「LLM 内容审核」→ 保存 → 后端立刻进入 audit 路径。**无需重启**。如果调大 `cache_max_entries` / `max_concurrent` 仍需重启（界面上会保留可输入但说明栏会注明）。
+
 ## 2026-05-07 (1.0.14)
 
 v1.0.14 把 v1.0.13 全套 substring / regex / 越狱模式默认违禁词清单**全部删除**，改为基于 deepseek-v4-flash-nothinking 的二态 LLM 安全审核（"违规" / "不违规"）。理由：substring 匹配在自然中英文 prose 上误判率太高（含合法的医学讨论、新闻报道、安全研究、教育内容），运营方反馈不可接受。VERSION 从 `1.0.13` 升到 `1.0.14`。

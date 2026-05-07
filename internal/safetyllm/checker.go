@@ -114,8 +114,19 @@ type Stats struct {
 }
 
 // LLMChecker is the production Checker.
+//
+// v1.0.15 hot-reload: cfg is no longer a frozen snapshot. The checker
+// asks the configSource for the live config on every Enabled() and
+// CheckWithAuth() call, so toggling safety.llm_check.enabled (or any
+// runtime knob like timeout / fail_open / model / TTL) via PUT
+// /admin/settings takes effect for the very next request — no restart.
+//
+// Two fields stay frozen at construction because they back finite-size
+// runtime objects: CacheMaxEntries (LRU capacity) and MaxConcurrent
+// (semaphore depth). Those still need a restart if the operator wants
+// to grow / shrink them.
 type LLMChecker struct {
-	cfg    Config
+	source ConfigSource
 	doer   CompletionDoer
 	cache  *lruCache
 	sem    chan struct{}
@@ -135,37 +146,69 @@ type LLMChecker struct {
 	latencyMeasureCount int64
 }
 
-// NewLLMChecker constructs an LLMChecker. Pass a nil doer to get a
-// disabled checker (always returns Verdict{Violation: false} without
-// touching upstream).
+// ConfigSource lets the checker read the current operator-facing
+// SafetyLLMCheck config at runtime so changes are picked up without a
+// process restart. Implementations must be safe for concurrent reads.
+type ConfigSource interface {
+	SafetyLLMCheckConfig() Config
+}
+
+// staticConfigSource wraps a frozen Config so legacy callers
+// (NewLLMChecker(cfg, doer)) keep working.
+type staticConfigSource struct{ cfg Config }
+
+func (s staticConfigSource) SafetyLLMCheckConfig() Config { return s.cfg }
+
+// NewLLMChecker constructs a checker bound to a frozen Config. Use this
+// in tests or anywhere config is known not to change. Pass a nil doer
+// to get a disabled checker.
 func NewLLMChecker(cfg Config, doer CompletionDoer) *LLMChecker {
-	if cfg.MaxConcurrent <= 0 {
-		cfg.MaxConcurrent = 1
+	return NewLLMCheckerWithSource(staticConfigSource{cfg: cfg}, doer)
+}
+
+// NewLLMCheckerWithSource is the production constructor: it accepts a
+// ConfigSource that reflects the live operator config snapshot, so
+// Enabled / TimeoutMs / FailOpen / Model / CacheTTLSeconds /
+// MinInputChars / MaxInputChars are picked up per-request without
+// restart. CacheMaxEntries + MaxConcurrent are read once at construction.
+func NewLLMCheckerWithSource(source ConfigSource, doer CompletionDoer) *LLMChecker {
+	bootstrap := source.SafetyLLMCheckConfig()
+	if bootstrap.MaxConcurrent <= 0 {
+		bootstrap.MaxConcurrent = 1
 	}
-	if cfg.CacheMaxEntries <= 0 {
-		cfg.CacheMaxEntries = 1
+	if bootstrap.CacheMaxEntries <= 0 {
+		bootstrap.CacheMaxEntries = 1
 	}
 	return &LLMChecker{
-		cfg:   cfg,
-		doer:  doer,
-		cache: newLRUCache(cfg.CacheMaxEntries),
-		sem:   make(chan struct{}, cfg.MaxConcurrent),
+		source: source,
+		doer:   doer,
+		cache:  newLRUCache(bootstrap.CacheMaxEntries),
+		sem:    make(chan struct{}, bootstrap.MaxConcurrent),
 	}
 }
 
-// Enabled reports whether the checker is currently active.
+func (c *LLMChecker) currentConfig() Config {
+	if c == nil || c.source == nil {
+		return DefaultConfig()
+	}
+	return c.source.SafetyLLMCheckConfig()
+}
+
+// Enabled reports whether the checker is currently active. Reads live
+// config so a WebUI flip propagates immediately.
 func (c *LLMChecker) Enabled() bool {
 	if c == nil {
 		return false
 	}
-	return c.cfg.Enabled && c.doer != nil
+	return c.currentConfig().Enabled && c.doer != nil
 }
 
 // CheckWithAuth runs a safety check using the caller's RequestAuth so
 // the upstream LLM call lands on the same managed-account budget the
 // rest of the request uses (no separate audit-account pool to manage).
 func (c *LLMChecker) CheckWithAuth(ctx context.Context, a *auth.RequestAuth, text string) (Verdict, error) {
-	if !c.Enabled() {
+	cfg := c.currentConfig()
+	if !cfg.Enabled || c.doer == nil {
 		return Verdict{Violation: false}, nil
 	}
 	c.mu.Lock()
@@ -173,17 +216,15 @@ func (c *LLMChecker) CheckWithAuth(ctx context.Context, a *auth.RequestAuth, tex
 	c.mu.Unlock()
 
 	trimmed := strings.TrimSpace(text)
-	if len(trimmed) < c.cfg.MinInputChars {
+	if len(trimmed) < cfg.MinInputChars {
 		c.mu.Lock()
 		c.skipped++
 		c.okCount++
 		c.mu.Unlock()
 		return Verdict{Violation: false}, nil
 	}
-	if len(trimmed) > c.cfg.MaxInputChars {
-		// Truncate to bound prompt size; keep the head + tail because
-		// jailbreak attempts often live in the tail.
-		keep := c.cfg.MaxInputChars / 2
+	if len(trimmed) > cfg.MaxInputChars && cfg.MaxInputChars > 0 {
+		keep := cfg.MaxInputChars / 2
 		trimmed = trimmed[:keep] + "\n\n[... truncated for safety check ...]\n\n" + trimmed[len(trimmed)-keep:]
 	}
 
@@ -201,20 +242,18 @@ func (c *LLMChecker) CheckWithAuth(ctx context.Context, a *auth.RequestAuth, tex
 		return v, nil
 	}
 
-	timeout := time.Duration(c.cfg.TimeoutMs) * time.Millisecond
+	timeout := time.Duration(cfg.TimeoutMs) * time.Millisecond
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Acquire semaphore slot or fall through fail-open if the context
-	// dies waiting (we never want safety review to wedge live traffic).
 	select {
 	case c.sem <- struct{}{}:
 		defer func() { <-c.sem }()
 	case <-checkCtx.Done():
-		return c.failOpenVerdict(0, errors.New("semaphore wait cancelled"))
+		return c.failOpenVerdict(cfg, 0, errors.New("semaphore wait cancelled"))
 	}
 	c.mu.Lock()
 	c.concurrentInflight++
@@ -227,7 +266,7 @@ func (c *LLMChecker) CheckWithAuth(ctx context.Context, a *auth.RequestAuth, tex
 
 	prompt := buildAuditPrompt(trimmed)
 	start := time.Now()
-	output, err := c.doer.RunSafetyCheck(checkCtx, a, c.cfg.Model, prompt)
+	output, err := c.doer.RunSafetyCheck(checkCtx, a, cfg.Model, prompt)
 	latencyMs := time.Since(start).Milliseconds()
 	if err != nil {
 		c.mu.Lock()
@@ -237,7 +276,7 @@ func (c *LLMChecker) CheckWithAuth(ctx context.Context, a *auth.RequestAuth, tex
 			c.upstreamErrors++
 		}
 		c.mu.Unlock()
-		return c.failOpenVerdict(latencyMs, err)
+		return c.failOpenVerdict(cfg, latencyMs, err)
 	}
 
 	violation, parsed := parseBinaryVerdict(output)
@@ -245,11 +284,11 @@ func (c *LLMChecker) CheckWithAuth(ctx context.Context, a *auth.RequestAuth, tex
 		c.mu.Lock()
 		c.parseErrors++
 		c.mu.Unlock()
-		return c.failOpenVerdict(latencyMs, errors.New("parse failed: "+output))
+		return c.failOpenVerdict(cfg, latencyMs, errors.New("parse failed: "+output))
 	}
 
 	v := Verdict{Violation: violation, LatencyMs: latencyMs}
-	c.cache.set(key, v, time.Now().Add(time.Duration(c.cfg.CacheTTLSeconds)*time.Second))
+	c.cache.set(key, v, time.Now().Add(time.Duration(cfg.CacheTTLSeconds)*time.Second))
 	c.mu.Lock()
 	if violation {
 		c.violations++
@@ -262,8 +301,8 @@ func (c *LLMChecker) CheckWithAuth(ctx context.Context, a *auth.RequestAuth, tex
 	return v, nil
 }
 
-func (c *LLMChecker) failOpenVerdict(latencyMs int64, _ error) (Verdict, error) {
-	if c.cfg.FailOpen {
+func (c *LLMChecker) failOpenVerdict(cfg Config, latencyMs int64, _ error) (Verdict, error) {
+	if cfg.FailOpen {
 		c.mu.Lock()
 		c.failOpenInvocations++
 		c.okCount++
@@ -281,6 +320,7 @@ func (c *LLMChecker) Stats() Stats {
 	if c == nil {
 		return Stats{Enabled: false}
 	}
+	cfg := c.currentConfig()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	avg := int64(0)
@@ -288,7 +328,7 @@ func (c *LLMChecker) Stats() Stats {
 		avg = c.totalLatencyMs / c.latencyMeasureCount
 	}
 	return Stats{
-		Enabled:             c.cfg.Enabled && c.doer != nil,
+		Enabled:             cfg.Enabled && c.doer != nil,
 		RequestsTotal:       c.requestsTotal,
 		Violations:          c.violations,
 		OK:                  c.okCount,
@@ -301,7 +341,7 @@ func (c *LLMChecker) Stats() Stats {
 		FailOpenInvocations: c.failOpenInvocations,
 		ConcurrentInflight:  c.concurrentInflight,
 		AvgLatencyMs:        avg,
-		Model:               c.cfg.Model,
+		Model:               cfg.Model,
 	}
 }
 
